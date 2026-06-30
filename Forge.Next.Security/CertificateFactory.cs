@@ -1,4 +1,6 @@
-﻿using System.Net;
+﻿using ErrorOr;
+using Forge.Next.Shared;
+using System.Net;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
@@ -24,18 +26,21 @@ public static class CertificateFactory
     /// <param name="startTime">The start time.</param>
     /// <param name="endTime">The end time.</param>
     /// <param name="password">The insecure password.</param>
+    /// <param name="keySize">Size of the key.</param>
     /// <returns>
     /// </returns>
-    public static X509Certificate2 CreateSelfSigned(
+    public static ErrorOr<X509Certificate2> CreateSelfSigned(
         string x500,
         string friendlyName,
         IEnumerable<string> dnsNames,
         DateTime startTime,
         DateTime endTime,
-        string password)
+        string password,
+        int keySize = 2048)
     {
-        X509Certificate2 certificate = CreateSelfSigned(x500, friendlyName, dnsNames, startTime, endTime);
-        return GetFromRawData(ExportToPfxRawData(certificate, password), password);
+        return CreateSelfSigned(x500, friendlyName, dnsNames, startTime, endTime, keySize)
+            .Then(certificate => ExportToPfxRawData(certificate, password))
+            .Then(pfxData => GetFromRawData(pfxData, password));
     }
 
     /// <summary>
@@ -46,30 +51,36 @@ public static class CertificateFactory
     /// <param name="dnsNames">The DNS names.</param>
     /// <param name="startTime">The start time.</param>
     /// <param name="endTime">The end time.</param>
+    /// <param name="keySize">Size of the key.</param>
     /// <returns></returns>
     /// <exception cref="ArgumentException">
     /// </exception>
-    public static X509Certificate2 CreateSelfSigned(
+    public static ErrorOr<X509Certificate2> CreateSelfSigned(
         string x500,
         string friendlyName,
         IEnumerable<string> dnsNames,
         DateTime startTime,
-        DateTime endTime)
+        DateTime endTime,
+        int keySize = 2048)
     {
-        string subject = x500 ?? string.Empty;
-        SubjectAlternativeNameBuilder sanBuilder = BuildSanBuilder(dnsNames);
-        X500DistinguishedName distinguishedName = new X500DistinguishedName(subject);
+        return typeof(CertificateFactory)
+            .Protect<Type, X509Certificate2>(_ =>
+            {
+                string subject = x500 ?? string.Empty;
+                SubjectAlternativeNameBuilder sanBuilder = BuildSanBuilder(dnsNames);
+                X500DistinguishedName distinguishedName = new X500DistinguishedName(subject);
 
-        using RSA rsa = RSA.Create(2048);
-        CertificateRequest request = BuildCertificateRequest(distinguishedName, rsa, sanBuilder);
+                using RSA rsa = RSA.Create(keySize);
+                CertificateRequest request = BuildCertificateRequest(distinguishedName, rsa, sanBuilder);
 
-        X509Certificate2 certificate = request.CreateSelfSigned(
-            new DateTimeOffset(startTime),
-            new DateTimeOffset(endTime));
+                X509Certificate2 certificate = request.CreateSelfSigned(
+                    new DateTimeOffset(startTime),
+                    new DateTimeOffset(endTime));
 
-        ApplyWindowsFriendlyName(certificate, friendlyName);
+                ApplyWindowsFriendlyName(certificate, friendlyName);
 
-        return certificate;
+                return certificate;
+            });
     }
 
     private static SubjectAlternativeNameBuilder BuildSanBuilder(IEnumerable<string> dnsNames)
@@ -82,6 +93,7 @@ public static class CertificateFactory
         }
 
         AppendDefaultSanEntries(sanBuilder);
+
         return sanBuilder;
     }
 
@@ -172,60 +184,74 @@ public static class CertificateFactory
     /// <param name="password">The password.</param>
     /// <returns>
     /// </returns>
-    public static byte[] ExportToPfxRawData(X509Certificate2 certificate, string password)
-        => certificate.Export(X509ContentType.Pfx, password);
+    public static ErrorOr<byte[]> ExportToPfxRawData(X509Certificate2 certificate, string password)
+        => certificate
+            .Protect<X509Certificate2, byte[]>(_ => certificate.Export(X509ContentType.Pfx, password));
 
     /// <summary>Exports to cer file.</summary>
     /// <param name="certificate">The certificate.</param>
     /// <returns>
     /// </returns>
-    public static byte[] ExportToCerFile(X509Certificate2 certificate)
-        => certificate.Export(X509ContentType.Cert);
+    public static ErrorOr<byte[]> ExportToCerFile(X509Certificate2 certificate)
+        => certificate
+            .Protect<X509Certificate2, byte[]>(_ => certificate.Export(X509ContentType.Cert));
 
     /// <summary>Gets the certificate for localhost.</summary>
     /// <param name="subject">The subject name for the certificate. CN=your company</param>
     /// <param name="friendlyName">The friendly name for the certificate.</param>
+    /// <param name="keySize">The size of the key.</param>
     /// <returns></returns>
-    public static X509Certificate2 GetForLocalhost(string subject, string friendlyName)
+    public static ErrorOr<X509Certificate2> GetForLocalhost(string subject, string friendlyName, int keySize = 2048)
     {
         return CreateSelfSigned(
             subject,
             friendlyName,
             Array.Empty<string>(),
             DateTime.UtcNow.AddDays(-1),
-            DateTime.MaxValue);
+            DateTime.MaxValue,
+            keySize);
     }
 
     /// <summary>Gets the certificate from raw data.</summary>
     /// <param name="certificateData">The certificate data.</param>
     /// <param name="password">The password.</param>
     /// <returns></returns>
-    public static X509Certificate2 GetFromRawData(byte[] certificateData, string password)
+    public static ErrorOr<X509Certificate2> GetFromRawData(byte[] certificateData, string password)
     {
+        return typeof(CertificateFactory)
+            .Protect<Type, X509Certificate2>(_ =>
 #if NET8_0
-        return new X509Certificate2(
-            certificateData,
-            password,
-            X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.MachineKeySet);
+                new X509Certificate2(
+                    certificateData,
+                    password,
+                    X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.MachineKeySet)
 #else
-        return X509CertificateLoader.LoadPkcs12(certificateData, password, X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.MachineKeySet);
+                X509CertificateLoader
+                    .LoadPkcs12(
+                        certificateData, 
+                        password, 
+                        X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.MachineKeySet)
 #endif
+            );
     }
 
     /// <summary>Gets the certificate from file.</summary>
     /// <param name="certificateFile">The certificate file.</param>
     /// <param name="password">The password.</param>
     /// <returns></returns>
-    public static X509Certificate2 GetFromFile(string certificateFile, string? password)
+    public static ErrorOr<X509Certificate2> GetFromFile(string certificateFile, string? password)
     {
+        return typeof(CertificateFactory)
+            .Protect<Type, X509Certificate2>(_ =>
 #if NET8_0
-        return new X509Certificate2(
-            certificateFile,
-            password,
-            X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.MachineKeySet);
+                new X509Certificate2(
+                    certificateFile,
+                    password,
+                    X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.MachineKeySet)
 #else
-        return X509CertificateLoader.LoadPkcs12FromFile(certificateFile, password, X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.MachineKeySet);
+                X509CertificateLoader.LoadPkcs12FromFile(certificateFile, password, X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.MachineKeySet)
 #endif
+            );
     }
 
 }

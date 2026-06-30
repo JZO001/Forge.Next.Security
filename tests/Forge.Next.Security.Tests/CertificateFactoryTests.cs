@@ -1,3 +1,4 @@
+using ErrorOr;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -13,17 +14,25 @@ namespace Forge.Next.Security.Tests;
 /// <see cref="CertificateFactory"/> is a <c>static</c> utility class that builds, exports and
 /// re-imports self-signed X.509 certificates. It has no injectable collaborators, therefore there
 /// is nothing for a mocking library such as NSubstitute to substitute here: every test below
-/// exercises the real .NET cryptographic primitives end-to-end and asserts on the resulting
-/// <see cref="X509Certificate2"/>. NSubstitute is reserved for the (future) types that take
-/// abstractions as dependencies.
+/// exercises the real .NET cryptographic primitives end-to-end and asserts on the resulting value.
+/// NSubstitute is reserved for the (future) types that take abstractions as dependencies.
+/// </para>
+///
+/// <para>
+/// Every public method returns an <see cref="ErrorOr{TValue}"/> instead of throwing. The factory
+/// wraps its work in the <c>Protect</c> helper from <c>Forge.Next.Shared</c>, which catches any
+/// thrown exception and converts it into an error of type <see cref="ErrorType.Unexpected"/>. Tests
+/// therefore assert on <see cref="ErrorOr{TValue}.IsError"/> / <see cref="ErrorOr{TValue}.Value"/>
+/// for the happy path and on <see cref="ErrorOr{TValue}.FirstError"/> for the failure path, rather
+/// than using <c>try/catch</c>.
 /// </para>
 ///
 /// <para>
 /// Assertions are written with Shouldly because that is the assertion library referenced by the
-/// test project. The PFX round-trip helpers (<see cref="CertificateFactory.GetFromRawData"/> and
-/// <see cref="CertificateFactory.GetFromFile"/>) load the key with <c>X509KeyStorageFlags.MachineKeySet</c>,
-/// which on Windows requires write access to the machine key container; the tests assume they are
-/// executed in such an environment (which is the case on a standard developer workstation).
+/// test project. The PFX round-trip helpers load the key with
+/// <c>X509KeyStorageFlags.MachineKeySet</c>, which on Windows requires write access to the machine
+/// key container; the tests assume they are executed in such an environment (a standard developer
+/// workstation).
 /// </para>
 /// </summary>
 public class CertificateFactoryTests
@@ -68,17 +77,19 @@ public class CertificateFactoryTests
     #region CreateSelfSigned (no password)
 
     /// <summary>
-    /// The basic overload must return a usable certificate that owns its private key and carries the
-    /// requested subject.
+    /// The basic overload must succeed and return a usable certificate that owns its private key and
+    /// carries the requested subject.
     /// </summary>
     [Fact]
     public void CreateSelfSignedTest()
     {
         // Act: create an ephemeral (in-memory) self-signed certificate valid for one day.
-        X509Certificate2 certificate = CreateCertificate();
+        ErrorOr<X509Certificate2> result = CreateCertificate();
 
-        // Assert: a certificate instance was produced.
-        certificate.ShouldNotBeNull();
+        // Assert: the operation completed without producing an error.
+        result.IsError.ShouldBeFalse();
+
+        X509Certificate2 certificate = result.Value;
 
         // Assert: the subject distinguished name was honoured verbatim.
         certificate.Subject.ShouldBe(Subject);
@@ -91,7 +102,7 @@ public class CertificateFactoryTests
     }
 
     /// <summary>
-    /// A <c>null</c> subject must not throw: the factory coalesces it to <see cref="string.Empty"/>,
+    /// A <c>null</c> subject must not error: the factory coalesces it to <see cref="string.Empty"/>,
     /// which yields a certificate with an empty subject distinguished name.
     /// </summary>
     [Fact]
@@ -99,15 +110,16 @@ public class CertificateFactoryTests
     {
         // Act: pass a null subject (the null-forgiving operator silences the nullable warning since
         // the parameter is declared non-nullable but the implementation defensively handles null).
-        X509Certificate2 certificate = CertificateFactory.CreateSelfSigned(
+        ErrorOr<X509Certificate2> result = CertificateFactory.CreateSelfSigned(
             null!,
             FriendlyName,
             Array.Empty<string>(),
             DateTime.UtcNow.AddDays(-1),
             DateTime.UtcNow.AddDays(1));
 
-        // Assert: the empty X500 name materialises as an empty subject string.
-        certificate.Subject.ShouldBe(string.Empty);
+        // Assert: success, and the empty X500 name materialises as an empty subject string.
+        result.IsError.ShouldBeFalse();
+        result.Value.Subject.ShouldBe(string.Empty);
     }
 
     /// <summary>
@@ -122,8 +134,11 @@ public class CertificateFactoryTests
         DateTime end = DateTime.UtcNow.AddDays(3);
 
         // Act.
-        X509Certificate2 certificate = CertificateFactory.CreateSelfSigned(
+        ErrorOr<X509Certificate2> result = CertificateFactory.CreateSelfSigned(
             Subject, FriendlyName, Array.Empty<string>(), start, end);
+
+        result.IsError.ShouldBeFalse();
+        X509Certificate2 certificate = result.Value;
 
         // Assert: NotBefore/NotAfter are surfaced by X509Certificate2 in local time, so normalise to
         // UTC before comparing. The tolerance absorbs the whole-second truncation described above.
@@ -139,7 +154,9 @@ public class CertificateFactoryTests
     public void CreateSelfSigned_AppliesFriendlyNameOnWindows_Test()
     {
         // Act.
-        X509Certificate2 certificate = CreateCertificate();
+        ErrorOr<X509Certificate2> result = CreateCertificate();
+        result.IsError.ShouldBeFalse();
+        X509Certificate2 certificate = result.Value;
 
         // Assert: branch on the running OS because the friendly name is a Windows-only concept.
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -155,21 +172,45 @@ public class CertificateFactoryTests
     }
 
     /// <summary>
-    /// The factory hard-codes a 2048-bit RSA key; assert the generated public key reflects that.
+    /// When no key size is specified the factory defaults to a 2048-bit RSA key; assert the
+    /// generated public key reflects that.
     /// </summary>
     [Fact]
-    public void CreateSelfSigned_Uses2048BitRsaKey_Test()
+    public void CreateSelfSigned_Uses2048BitRsaKeyByDefault_Test()
     {
         // Act.
-        X509Certificate2 certificate = CreateCertificate();
+        ErrorOr<X509Certificate2> result = CreateCertificate();
+        result.IsError.ShouldBeFalse();
 
         // Read the RSA public key off the certificate. The 'using' guarantees the key handle is
         // released promptly even though these are managed objects.
-        using RSA? publicKey = certificate.GetRSAPublicKey();
+        using RSA? publicKey = result.Value.GetRSAPublicKey();
 
-        // Assert: the key exists and is exactly 2048 bits, matching RSA.Create(2048) in the factory.
+        // Assert: the key exists and is exactly 2048 bits, matching the default RSA.Create(2048).
         publicKey.ShouldNotBeNull();
         publicKey.KeySize.ShouldBe(2048);
+    }
+
+    /// <summary>
+    /// A caller-supplied <c>keySize</c> must be honoured. A 4096-bit key is used (rather than a
+    /// smaller, faster value) because some platforms reject RSA keys below 2048 bits, which would
+    /// make a smaller key flaky across environments.
+    /// </summary>
+    [Fact]
+    public void CreateSelfSigned_RespectsCustomKeySize_Test()
+    {
+        // Act: the trailing integer selects the parameterless (no-password) overload's keySize.
+        ErrorOr<X509Certificate2> result = CertificateFactory.CreateSelfSigned(
+            Subject, FriendlyName, Array.Empty<string>(),
+            DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1), 4096);
+
+        result.IsError.ShouldBeFalse();
+
+        using RSA? publicKey = result.Value.GetRSAPublicKey();
+
+        // Assert: the generated key honours the requested 4096-bit size.
+        publicKey.ShouldNotBeNull();
+        publicKey.KeySize.ShouldBe(4096);
     }
 
     /// <summary>
@@ -180,11 +221,12 @@ public class CertificateFactoryTests
     public void CreateSelfSigned_UsesSha256RsaSignature_Test()
     {
         // Act.
-        X509Certificate2 certificate = CreateCertificate();
+        ErrorOr<X509Certificate2> result = CreateCertificate();
+        result.IsError.ShouldBeFalse();
 
         // Assert: compare against the well-known OID for sha256RSA. Comparing the OID (rather than
         // the localisable friendly name) keeps the assertion culture-independent.
-        certificate.SignatureAlgorithm.Value.ShouldBe("1.2.840.113549.1.1.11");
+        result.Value.SignatureAlgorithm.Value.ShouldBe("1.2.840.113549.1.1.11");
     }
 
     /// <summary>
@@ -195,10 +237,11 @@ public class CertificateFactoryTests
     public void CreateSelfSigned_AddsServerAuthenticationEku_Test()
     {
         // Act.
-        X509Certificate2 certificate = CreateCertificate();
+        ErrorOr<X509Certificate2> result = CreateCertificate();
+        result.IsError.ShouldBeFalse();
 
         // Locate the EKU extension via the private helper.
-        X509EnhancedKeyUsageExtension eku = GetEnhancedKeyUsage(certificate);
+        X509EnhancedKeyUsageExtension eku = GetEnhancedKeyUsage(result.Value);
 
         // Assert: the server-authentication OID is present among the enhanced key usages.
         eku.EnhancedKeyUsages
@@ -215,10 +258,11 @@ public class CertificateFactoryTests
     public void CreateSelfSigned_AddsExpectedKeyUsages_Test()
     {
         // Act.
-        X509Certificate2 certificate = CreateCertificate();
+        ErrorOr<X509Certificate2> result = CreateCertificate();
+        result.IsError.ShouldBeFalse();
 
         // Locate the Key Usage extension via the private helper.
-        X509KeyUsageExtension keyUsage = GetKeyUsage(certificate);
+        X509KeyUsageExtension keyUsage = GetKeyUsage(result.Value);
 
         // Compose the exact set of flags the factory requests so the assertion is explicit.
         X509KeyUsageFlags expected =
@@ -238,10 +282,11 @@ public class CertificateFactoryTests
     public void CreateSelfSigned_IsNotCertificateAuthority_Test()
     {
         // Act.
-        X509Certificate2 certificate = CreateCertificate();
+        ErrorOr<X509Certificate2> result = CreateCertificate();
+        result.IsError.ShouldBeFalse();
 
         // Locate the Basic Constraints extension via the private helper.
-        X509BasicConstraintsExtension basicConstraints = GetBasicConstraints(certificate);
+        X509BasicConstraintsExtension basicConstraints = GetBasicConstraints(result.Value);
 
         // Assert: the certificate is explicitly flagged as a non-CA (end-entity) certificate.
         basicConstraints.CertificateAuthority.ShouldBeFalse();
@@ -258,12 +303,13 @@ public class CertificateFactoryTests
         const string customDns = "example.com";
 
         // Act.
-        X509Certificate2 certificate = CertificateFactory.CreateSelfSigned(
+        ErrorOr<X509Certificate2> result = CertificateFactory.CreateSelfSigned(
             Subject, FriendlyName, new[] { customDns },
             DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1));
+        result.IsError.ShouldBeFalse();
 
         // Read back every SAN entry.
-        List<string> alternateNames = CertificateAccess.GetAlternateNames(certificate).ToList();
+        List<string> alternateNames = AlternateNamesOf(result.Value);
 
         // Assert: the custom DNS name is present, and present exactly once (proving it was not
         // duplicated by also matching a default entry).
@@ -282,13 +328,14 @@ public class CertificateFactoryTests
         const string customIp = "192.168.1.5";
 
         // Act.
-        X509Certificate2 certificate = CertificateFactory.CreateSelfSigned(
+        ErrorOr<X509Certificate2> result = CertificateFactory.CreateSelfSigned(
             Subject, FriendlyName, new[] { customIp },
             DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1));
+        result.IsError.ShouldBeFalse();
 
         // GetAlternateNames renders IP SAN entries via IPAddress.ToString(), so the textual form
         // round-trips back to the same string.
-        List<string> alternateNames = CertificateAccess.GetAlternateNames(certificate).ToList();
+        List<string> alternateNames = AlternateNamesOf(result.Value);
 
         // Assert: the IP appears exactly once.
         alternateNames.ShouldContain(customIp);
@@ -307,11 +354,12 @@ public class CertificateFactoryTests
         const string loopback = "127.0.0.1";
 
         // Act: supply the loopback explicitly as a "custom" entry.
-        X509Certificate2 certificate = CertificateFactory.CreateSelfSigned(
+        ErrorOr<X509Certificate2> result = CertificateFactory.CreateSelfSigned(
             Subject, FriendlyName, new[] { loopback },
             DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1));
+        result.IsError.ShouldBeFalse();
 
-        List<string> alternateNames = CertificateAccess.GetAlternateNames(certificate).ToList();
+        List<string> alternateNames = AlternateNamesOf(result.Value);
 
         // Assert: exactly one loopback entry (the default one). Had the custom entry not been
         // skipped, it would appear twice.
@@ -326,11 +374,12 @@ public class CertificateFactoryTests
     public void CreateSelfSigned_SkipsReservedLocalhostDnsName_Test()
     {
         // Act: supply "localhost" explicitly.
-        X509Certificate2 certificate = CertificateFactory.CreateSelfSigned(
+        ErrorOr<X509Certificate2> result = CertificateFactory.CreateSelfSigned(
             Subject, FriendlyName, new[] { CertificateFactory.Localhost },
             DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1));
+        result.IsError.ShouldBeFalse();
 
-        List<string> alternateNames = CertificateAccess.GetAlternateNames(certificate).ToList();
+        List<string> alternateNames = AlternateNamesOf(result.Value);
 
         // Assert: only the single default "localhost" entry exists; the custom one was suppressed.
         alternateNames.Count(name => name == CertificateFactory.Localhost).ShouldBe(1);
@@ -344,11 +393,12 @@ public class CertificateFactoryTests
     public void CreateSelfSigned_SkipsWildcardDnsName_Test()
     {
         // Act: supply "*" as a custom entry.
-        X509Certificate2 certificate = CertificateFactory.CreateSelfSigned(
+        ErrorOr<X509Certificate2> result = CertificateFactory.CreateSelfSigned(
             Subject, FriendlyName, new[] { "*" },
             DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1));
+        result.IsError.ShouldBeFalse();
 
-        List<string> alternateNames = CertificateAccess.GetAlternateNames(certificate).ToList();
+        List<string> alternateNames = AlternateNamesOf(result.Value);
 
         // Assert: the wildcard never made it into the certificate.
         alternateNames.ShouldNotContain("*");
@@ -365,11 +415,12 @@ public class CertificateFactoryTests
         string machineName = Environment.MachineName;
 
         // Act: supply the machine name explicitly.
-        X509Certificate2 certificate = CertificateFactory.CreateSelfSigned(
+        ErrorOr<X509Certificate2> result = CertificateFactory.CreateSelfSigned(
             Subject, FriendlyName, new[] { machineName },
             DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1));
+        result.IsError.ShouldBeFalse();
 
-        List<string> alternateNames = CertificateAccess.GetAlternateNames(certificate).ToList();
+        List<string> alternateNames = AlternateNamesOf(result.Value);
 
         // Assert: exactly one machine-name entry (the default one); the custom duplicate was skipped.
         alternateNames.Count(name => name == machineName).ShouldBe(1);
@@ -383,11 +434,12 @@ public class CertificateFactoryTests
     public void CreateSelfSigned_AddsDefaultSubjectAlternativeNames_Test()
     {
         // Act: create a certificate with no custom names at all.
-        X509Certificate2 certificate = CertificateFactory.CreateSelfSigned(
+        ErrorOr<X509Certificate2> result = CertificateFactory.CreateSelfSigned(
             Subject, FriendlyName, Array.Empty<string>(),
             DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1));
+        result.IsError.ShouldBeFalse();
 
-        List<string> alternateNames = CertificateAccess.GetAlternateNames(certificate).ToList();
+        List<string> alternateNames = AlternateNamesOf(result.Value);
 
         // Assert: each documented default loopback/any address and DNS label is present.
         alternateNames.ShouldContain("127.0.0.1");          // IPAddress.Loopback
@@ -414,9 +466,12 @@ public class CertificateFactoryTests
         const string customDns = "secure.example";
 
         // Act: the overload performs an export+import round-trip internally.
-        X509Certificate2 certificate = CertificateFactory.CreateSelfSigned(
+        ErrorOr<X509Certificate2> result = CertificateFactory.CreateSelfSigned(
             Subject, FriendlyName, new[] { customDns },
             DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1), Password);
+
+        result.IsError.ShouldBeFalse();
+        X509Certificate2 certificate = result.Value;
 
         // Assert: round-tripping through a PFX preserves the private key.
         certificate.HasPrivateKey.ShouldBeTrue();
@@ -425,7 +480,7 @@ public class CertificateFactoryTests
         certificate.Subject.ShouldBe(Subject);
 
         // Assert: the SAN entries survive the round-trip as well.
-        CertificateAccess.GetAlternateNames(certificate).ShouldContain(customDns);
+        AlternateNamesOf(certificate).ShouldContain(customDns);
     }
 
     #endregion
@@ -440,19 +495,20 @@ public class CertificateFactoryTests
     public void ExportToPfxRawDataTest()
     {
         // Arrange: an ephemeral certificate that owns its private key.
-        X509Certificate2 certificate = CreateCertificate();
+        X509Certificate2 certificate = CreateCertificate().Value;
 
         // Act: export the full certificate + private key as a PKCS#12/PFX blob.
-        byte[] pfx = CertificateFactory.ExportToPfxRawData(certificate, Password);
+        ErrorOr<byte[]> result = CertificateFactory.ExportToPfxRawData(certificate, Password);
 
-        // Assert: the export produced bytes.
-        pfx.ShouldNotBeNull();
-        pfx.Length.ShouldBeGreaterThan(0);
+        // Assert: the export succeeded and produced bytes.
+        result.IsError.ShouldBeFalse();
+        result.Value.Length.ShouldBeGreaterThan(0);
 
         // Assert: the blob round-trips back to an equivalent certificate (same thumbprint, with key).
-        X509Certificate2 reimported = CertificateFactory.GetFromRawData(pfx, Password);
-        reimported.Thumbprint.ShouldBe(certificate.Thumbprint);
-        reimported.HasPrivateKey.ShouldBeTrue();
+        ErrorOr<X509Certificate2> reimported = CertificateFactory.GetFromRawData(result.Value, Password);
+        reimported.IsError.ShouldBeFalse();
+        reimported.Value.Thumbprint.ShouldBe(certificate.Thumbprint);
+        reimported.Value.HasPrivateKey.ShouldBeTrue();
     }
 
     #endregion
@@ -467,17 +523,17 @@ public class CertificateFactoryTests
     public void ExportToCerFileTest()
     {
         // Arrange.
-        X509Certificate2 certificate = CreateCertificate();
+        X509Certificate2 certificate = CreateCertificate().Value;
 
         // Act: export the public certificate in DER encoding.
-        byte[] cer = CertificateFactory.ExportToCerFile(certificate);
+        ErrorOr<byte[]> result = CertificateFactory.ExportToCerFile(certificate);
 
-        // Assert: bytes were produced.
-        cer.ShouldNotBeNull();
-        cer.Length.ShouldBeGreaterThan(0);
+        // Assert: success and bytes were produced.
+        result.IsError.ShouldBeFalse();
+        result.Value.Length.ShouldBeGreaterThan(0);
 
         // Re-load the DER bytes as a public-only certificate.
-        X509Certificate2 reimported = X509CertificateLoader.LoadCertificate(cer);
+        X509Certificate2 reimported = X509CertificateLoader.LoadCertificate(result.Value);
 
         // Assert: identity is preserved but the private key is intentionally absent.
         reimported.Thumbprint.ShouldBe(certificate.Thumbprint);
@@ -497,7 +553,10 @@ public class CertificateFactoryTests
     public void GetForLocalhostTest()
     {
         // Act.
-        X509Certificate2 certificate = CertificateFactory.GetForLocalhost(Subject, FriendlyName);
+        ErrorOr<X509Certificate2> result = CertificateFactory.GetForLocalhost(Subject, FriendlyName);
+
+        result.IsError.ShouldBeFalse();
+        X509Certificate2 certificate = result.Value;
 
         // Assert: subject honoured.
         certificate.Subject.ShouldBe(Subject);
@@ -509,7 +568,7 @@ public class CertificateFactoryTests
         certificate.NotAfter.ToUniversalTime().Year.ShouldBe(9999);
 
         // Assert: it is usable for localhost connections.
-        CertificateAccess.GetAlternateNames(certificate).ShouldContain(CertificateFactory.Localhost);
+        AlternateNamesOf(certificate).ShouldContain(CertificateFactory.Localhost);
     }
 
     #endregion
@@ -524,30 +583,36 @@ public class CertificateFactoryTests
     public void GetFromRawDataTest()
     {
         // Arrange: produce a PFX blob from an ephemeral certificate.
-        X509Certificate2 original = CreateCertificate();
-        byte[] pfx = CertificateFactory.ExportToPfxRawData(original, Password);
+        X509Certificate2 original = CreateCertificate().Value;
+        byte[] pfx = CertificateFactory.ExportToPfxRawData(original, Password).Value;
 
         // Act.
-        X509Certificate2 loaded = CertificateFactory.GetFromRawData(pfx, Password);
+        ErrorOr<X509Certificate2> result = CertificateFactory.GetFromRawData(pfx, Password);
 
-        // Assert: identity preserved and the private key was imported.
-        loaded.Thumbprint.ShouldBe(original.Thumbprint);
-        loaded.HasPrivateKey.ShouldBeTrue();
+        // Assert: success, identity preserved and the private key was imported.
+        result.IsError.ShouldBeFalse();
+        result.Value.Thumbprint.ShouldBe(original.Thumbprint);
+        result.Value.HasPrivateKey.ShouldBeTrue();
     }
 
     /// <summary>
-    /// Supplying the wrong password when loading a PFX must surface as a
-    /// <see cref="CryptographicException"/>.
+    /// Supplying the wrong password when loading a PFX must surface as an error of type
+    /// <see cref="ErrorType.Unexpected"/> (the <c>Protect</c> helper converts the underlying
+    /// <see cref="CryptographicException"/> into that error) rather than throwing.
     /// </summary>
     [Fact]
-    public void GetFromRawData_WrongPassword_Throws_Test()
+    public void GetFromRawData_WrongPassword_ReturnsError_Test()
     {
         // Arrange: export with one password...
-        X509Certificate2 original = CreateCertificate();
-        byte[] pfx = CertificateFactory.ExportToPfxRawData(original, Password);
+        X509Certificate2 original = CreateCertificate().Value;
+        byte[] pfx = CertificateFactory.ExportToPfxRawData(original, Password).Value;
 
-        // Act & Assert: ...then attempt to load with a different password.
-        Should.Throw<CryptographicException>(() => CertificateFactory.GetFromRawData(pfx, "not-the-password"));
+        // Act: ...then attempt to load with a different password.
+        ErrorOr<X509Certificate2> result = CertificateFactory.GetFromRawData(pfx, "not-the-password");
+
+        // Assert: an error is returned, classified as Unexpected.
+        result.IsError.ShouldBeTrue();
+        result.FirstError.Type.ShouldBe(ErrorType.Unexpected);
     }
 
     #endregion
@@ -562,19 +627,20 @@ public class CertificateFactoryTests
     public void GetFromFileTest()
     {
         // Arrange: write a PFX blob to a unique temporary file.
-        X509Certificate2 original = CreateCertificate();
-        byte[] pfx = CertificateFactory.ExportToPfxRawData(original, Password);
+        X509Certificate2 original = CreateCertificate().Value;
+        byte[] pfx = CertificateFactory.ExportToPfxRawData(original, Password).Value;
         string path = Path.Combine(Path.GetTempPath(), $"forge-cert-{Guid.NewGuid():N}.pfx");
         File.WriteAllBytes(path, pfx);
 
         try
         {
             // Act.
-            X509Certificate2 loaded = CertificateFactory.GetFromFile(path, Password);
+            ErrorOr<X509Certificate2> result = CertificateFactory.GetFromFile(path, Password);
 
-            // Assert: identity preserved and the private key was imported.
-            loaded.Thumbprint.ShouldBe(original.Thumbprint);
-            loaded.HasPrivateKey.ShouldBeTrue();
+            // Assert: success, identity preserved and the private key was imported.
+            result.IsError.ShouldBeFalse();
+            result.Value.Thumbprint.ShouldBe(original.Thumbprint);
+            result.Value.HasPrivateKey.ShouldBeTrue();
         }
         finally
         {
@@ -584,27 +650,50 @@ public class CertificateFactoryTests
     }
 
     /// <summary>
-    /// Loading a PFX file with the wrong password must surface as a
-    /// <see cref="CryptographicException"/>.
+    /// Loading a PFX file with the wrong password must surface as an <see cref="ErrorType.Unexpected"/>
+    /// error rather than throwing.
     /// </summary>
     [Fact]
-    public void GetFromFile_WrongPassword_Throws_Test()
+    public void GetFromFile_WrongPassword_ReturnsError_Test()
     {
         // Arrange.
-        X509Certificate2 original = CreateCertificate();
-        byte[] pfx = CertificateFactory.ExportToPfxRawData(original, Password);
+        X509Certificate2 original = CreateCertificate().Value;
+        byte[] pfx = CertificateFactory.ExportToPfxRawData(original, Password).Value;
         string path = Path.Combine(Path.GetTempPath(), $"forge-cert-{Guid.NewGuid():N}.pfx");
         File.WriteAllBytes(path, pfx);
 
         try
         {
-            // Act & Assert.
-            Should.Throw<CryptographicException>(() => CertificateFactory.GetFromFile(path, "not-the-password"));
+            // Act.
+            ErrorOr<X509Certificate2> result = CertificateFactory.GetFromFile(path, "not-the-password");
+
+            // Assert.
+            result.IsError.ShouldBeTrue();
+            result.FirstError.Type.ShouldBe(ErrorType.Unexpected);
         }
         finally
         {
             File.Delete(path);
         }
+    }
+
+    /// <summary>
+    /// Pointing at a non-existent file must surface as an <see cref="ErrorType.Unexpected"/> error
+    /// (the caught <see cref="FileNotFoundException"/>/<see cref="CryptographicException"/>) rather
+    /// than throwing.
+    /// </summary>
+    [Fact]
+    public void GetFromFile_MissingFile_ReturnsError_Test()
+    {
+        // Arrange: a path that is essentially guaranteed not to exist.
+        string missingPath = Path.Combine(Path.GetTempPath(), $"forge-missing-{Guid.NewGuid():N}.pfx");
+
+        // Act.
+        ErrorOr<X509Certificate2> result = CertificateFactory.GetFromFile(missingPath, Password);
+
+        // Assert: an error is returned instead of an exception escaping.
+        result.IsError.ShouldBeTrue();
+        result.FirstError.Type.ShouldBe(ErrorType.Unexpected);
     }
 
     #endregion
@@ -616,8 +705,12 @@ public class CertificateFactoryTests
     /// name <see cref="FriendlyName"/>, no custom SAN names, valid from yesterday to tomorrow).
     /// Centralising the "happy path" creation keeps the individual tests terse and consistent.
     /// </summary>
-    /// <returns>A freshly generated <see cref="X509Certificate2"/> owning its private key.</returns>
-    private static X509Certificate2 CreateCertificate()
+    /// <returns>
+    /// The <see cref="ErrorOr{TValue}"/> produced by the factory. Callers that need the certificate
+    /// directly assert <c>IsError</c> first (or read <c>.Value</c> when success is a precondition of
+    /// the test rather than the thing under test).
+    /// </returns>
+    private static ErrorOr<X509Certificate2> CreateCertificate()
     {
         // A one-day-either-side validity window keeps the certificate unambiguously "currently valid"
         // without depending on the host clock being perfectly aligned.
@@ -627,6 +720,22 @@ public class CertificateFactoryTests
             Array.Empty<string>(),
             DateTime.UtcNow.AddDays(-1),
             DateTime.UtcNow.AddDays(1));
+    }
+
+    /// <summary>
+    /// Reads the Subject Alternative Names off a certificate, asserting that the underlying
+    /// <see cref="CertificateAccess.GetAlternateNames"/> call did not error, and returns them as a
+    /// materialised list so callers can use LINQ counts/contains on a stable snapshot.
+    /// </summary>
+    /// <param name="certificate">The certificate to inspect.</param>
+    /// <returns>The certificate's SAN entries (IP addresses rendered as text, then DNS names).</returns>
+    private static List<string> AlternateNamesOf(X509Certificate2 certificate)
+    {
+        ErrorOr<IEnumerable<string>> result = CertificateAccess.GetAlternateNames(certificate);
+
+        // Reading SANs must succeed; a failure here would mask the real assertion in the caller.
+        result.IsError.ShouldBeFalse();
+        return result.Value.ToList();
     }
 
     /// <summary>

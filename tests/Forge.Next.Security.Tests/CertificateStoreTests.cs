@@ -1,3 +1,4 @@
+using ErrorOr;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Shouldly;
@@ -17,6 +18,15 @@ namespace Forge.Next.Security.Tests;
 /// <see cref="StoreLocation.CurrentUser"/>), which is writable without elevation. Every test that
 /// adds a certificate removes it again in a <c>finally</c>/<c>Dispose</c> block so the store is
 /// left exactly as it was found.
+/// </para>
+///
+/// <para>
+/// Every method returns an <see cref="ErrorOr{TValue}"/>: the read methods wrap their work in the
+/// <c>Protect</c> helper (turning exceptions into <see cref="ErrorType.Unexpected"/> errors),
+/// <see cref="CertificateAccess.FindByThumbprint"/> returns an explicit
+/// <see cref="ErrorType.NotFound"/> when nothing matches, and the mutating methods return
+/// <see cref="Success"/>. Tests assert on <c>IsError</c> / <c>Value</c> / <c>FirstError</c>
+/// accordingly.
 /// </para>
 ///
 /// <para>
@@ -54,19 +64,21 @@ public class CertificateStoreTests
         const string ip = "10.20.30.40";
         X509Certificate2 certificate = CertificateFactory.CreateSelfSigned(
             "CN=AltNames", "AltNames", new[] { dns, ip },
-            DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1));
+            DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1)).Value;
 
         // Act.
-        List<string> alternateNames = CertificateAccess.GetAlternateNames(certificate).ToList();
+        ErrorOr<IEnumerable<string>> result = CertificateAccess.GetAlternateNames(certificate);
 
-        // Assert: both the DNS name and the IP address were extracted from the SAN extension.
+        // Assert: success, and both the DNS name and the IP address were extracted from the SAN.
+        result.IsError.ShouldBeFalse();
+        List<string> alternateNames = result.Value.ToList();
         alternateNames.ShouldContain(dns);
         alternateNames.ShouldContain(ip);
     }
 
     /// <summary>
-    /// A certificate that has no Subject Alternative Name extension at all must yield an empty
-    /// sequence rather than throwing.
+    /// A certificate that has no Subject Alternative Name extension at all must yield a successful,
+    /// empty sequence rather than an error.
     /// </summary>
     [Fact]
     public void GetAlternateNames_ReturnsEmptyForCertificateWithoutSan_Test()
@@ -75,10 +87,11 @@ public class CertificateStoreTests
         using X509Certificate2 certificate = CreateCertificateWithoutSan();
 
         // Act.
-        IEnumerable<string> alternateNames = CertificateAccess.GetAlternateNames(certificate);
+        ErrorOr<IEnumerable<string>> result = CertificateAccess.GetAlternateNames(certificate);
 
-        // Assert: no SAN extension means no alternate names.
-        alternateNames.ShouldBeEmpty();
+        // Assert: success with no alternate names.
+        result.IsError.ShouldBeFalse();
+        result.Value.ShouldBeEmpty();
     }
 
     #endregion
@@ -86,7 +99,7 @@ public class CertificateStoreTests
     #region AddToStore / FindByThumbprint / RemoveFromStore
 
     /// <summary>
-    /// Adding a certificate to the store must make it discoverable by its thumbprint.
+    /// Adding a certificate to the store must succeed and make it discoverable by its thumbprint.
     /// </summary>
     [Fact]
     public void AddToStoreTest()
@@ -97,12 +110,12 @@ public class CertificateStoreTests
         using (new StoreCertificateScope(certificate))
         {
             // Act: look the certificate up again straight from the store.
-            X509Certificate2? found = CertificateAccess.FindByThumbprint(
+            ErrorOr<X509Certificate2> found = CertificateAccess.FindByThumbprint(
                 TestStoreName, TestStoreLocation, certificate.Thumbprint);
 
             // Assert: the certificate we just added is present.
-            found.ShouldNotBeNull();
-            found.Thumbprint.ShouldBe(certificate.Thumbprint);
+            found.IsError.ShouldBeFalse();
+            found.Value.Thumbprint.ShouldBe(certificate.Thumbprint);
         }
     }
 
@@ -118,31 +131,33 @@ public class CertificateStoreTests
         using (new StoreCertificateScope(certificate))
         {
             // Act.
-            X509Certificate2? found = CertificateAccess.FindByThumbprint(
+            ErrorOr<X509Certificate2> result = CertificateAccess.FindByThumbprint(
                 TestStoreName, TestStoreLocation, certificate.Thumbprint);
 
-            // Assert: a non-null certificate with the requested thumbprint is returned.
-            found.ShouldNotBeNull();
-            found.Thumbprint.ShouldBe(certificate.Thumbprint);
+            // Assert: a certificate with the requested thumbprint is returned.
+            result.IsError.ShouldBeFalse();
+            result.Value.Thumbprint.ShouldBe(certificate.Thumbprint);
         }
     }
 
     /// <summary>
-    /// <see cref="CertificateAccess.FindByThumbprint"/> must return <c>null</c> when no certificate
-    /// with the requested thumbprint is present (the <c>Count &gt; 0</c> guard returns null).
+    /// <see cref="CertificateAccess.FindByThumbprint"/> must return a
+    /// <see cref="ErrorType.NotFound"/> error when no certificate with the requested thumbprint is
+    /// present (the implementation returns <c>Error.NotFound()</c> for the empty result).
     /// </summary>
     [Fact]
-    public void FindByThumbprint_ReturnsNullWhenNotFound_Test()
+    public void FindByThumbprint_ReturnsNotFoundWhenMissing_Test()
     {
         // Arrange: a syntactically valid but almost-certainly-absent 40-hex-character thumbprint.
         string missingThumbprint = new string('A', 40);
 
         // Act.
-        X509Certificate2? found = CertificateAccess.FindByThumbprint(
+        ErrorOr<X509Certificate2> result = CertificateAccess.FindByThumbprint(
             TestStoreName, TestStoreLocation, missingThumbprint);
 
-        // Assert: nothing matched, so null is returned.
-        found.ShouldBeNull();
+        // Assert: nothing matched, so a NotFound error is returned.
+        result.IsError.ShouldBeTrue();
+        result.FirstError.Type.ShouldBe(ErrorType.NotFound);
     }
 
     /// <summary>
@@ -155,33 +170,40 @@ public class CertificateStoreTests
         // Arrange: add a certificate to the store ourselves (not via the scope helper, because this
         // test is specifically exercising removal).
         using X509Certificate2 certificate = CreateStoreCertificate();
-        CertificateAccess.AddToStore(certificate, TestStoreName, TestStoreLocation);
+        CertificateAccess.AddToStore(certificate, TestStoreName, TestStoreLocation).IsError.ShouldBeFalse();
 
         // Sanity precondition: it really is in the store before we remove it.
         CertificateAccess.FindByThumbprint(TestStoreName, TestStoreLocation, certificate.Thumbprint)
-            .ShouldNotBeNull();
+            .IsError.ShouldBeFalse();
 
         // Act.
-        CertificateAccess.RemoveFromStore(certificate.Thumbprint, TestStoreName, TestStoreLocation);
+        ErrorOr<Success> removed = CertificateAccess.RemoveFromStore(
+            certificate.Thumbprint, TestStoreName, TestStoreLocation);
 
-        // Assert: the certificate can no longer be found.
+        // Assert: removal reported success...
+        removed.IsError.ShouldBeFalse();
+
+        // ...and the certificate can no longer be found (NotFound error).
         CertificateAccess.FindByThumbprint(TestStoreName, TestStoreLocation, certificate.Thumbprint)
-            .ShouldBeNull();
+            .IsError.ShouldBeTrue();
     }
 
     /// <summary>
-    /// Removing a thumbprint that is not present in the store must be a harmless no-op (the
-    /// <c>Count &gt; 0</c> guard prevents touching a non-existent certificate).
+    /// Removing a thumbprint that is not present in the store must be a harmless no-op that still
+    /// reports success (the <c>Count &gt; 0</c> guard prevents touching a non-existent certificate).
     /// </summary>
     [Fact]
-    public void RemoveFromStore_NonExistentThumbprint_DoesNotThrow_Test()
+    public void RemoveFromStore_NonExistentThumbprint_DoesNotError_Test()
     {
         // Arrange: a thumbprint that does not correspond to any certificate.
         string missingThumbprint = new string('B', 40);
 
-        // Act & Assert: the call completes without throwing.
-        Should.NotThrow(() => CertificateAccess.RemoveFromStore(
-            missingThumbprint, TestStoreName, TestStoreLocation));
+        // Act.
+        ErrorOr<Success> result = CertificateAccess.RemoveFromStore(
+            missingThumbprint, TestStoreName, TestStoreLocation);
+
+        // Assert: the call completes successfully without error.
+        result.IsError.ShouldBeFalse();
     }
 
     #endregion
@@ -200,13 +222,13 @@ public class CertificateStoreTests
         using (new StoreCertificateScope(certificate))
         {
             // Act.
-            List<X509Certificate2> all = CertificateAccess
-                .GetAllFromStore(TestStoreName, TestStoreLocation)
-                .ToList();
+            ErrorOr<IEnumerable<X509Certificate2>> result = CertificateAccess
+                .GetAllFromStore(TestStoreName, TestStoreLocation);
 
-            // Assert: our certificate is among the returned set (matched by thumbprint, since the
-            // shared store may legitimately contain other certificates as well).
-            all.ShouldContain(cert => cert.Thumbprint == certificate.Thumbprint);
+            // Assert: success, and our certificate is among the returned set (matched by thumbprint,
+            // since the shared store may legitimately contain other certificates as well).
+            result.IsError.ShouldBeFalse();
+            result.Value.ShouldContain(cert => cert.Thumbprint == certificate.Thumbprint);
         }
     }
 
@@ -227,12 +249,12 @@ public class CertificateStoreTests
         using (new StoreCertificateScope(certificate))
         {
             // Act.
-            List<X509Certificate2> matches = CertificateAccess
-                .FindByDnsNames(TestStoreName, TestStoreLocation, new[] { uniqueDns })
-                .ToList();
+            ErrorOr<IEnumerable<X509Certificate2>> result = CertificateAccess
+                .FindByDnsNames(TestStoreName, TestStoreLocation, new[] { uniqueDns });
 
-            // Assert: exactly our certificate is returned for this unique name.
-            matches.ShouldContain(cert => cert.Thumbprint == certificate.Thumbprint);
+            // Assert: success, and our certificate is returned for this unique name.
+            result.IsError.ShouldBeFalse();
+            result.Value.ShouldContain(cert => cert.Thumbprint == certificate.Thumbprint);
         }
     }
 
@@ -249,17 +271,17 @@ public class CertificateStoreTests
         using (new StoreCertificateScope(certificate))
         {
             // Act: query using the upper-cased form of the stored (lower-case) DNS name.
-            List<X509Certificate2> matches = CertificateAccess
-                .FindByDnsNames(TestStoreName, TestStoreLocation, new[] { uniqueDns.ToUpperInvariant() })
-                .ToList();
+            ErrorOr<IEnumerable<X509Certificate2>> result = CertificateAccess
+                .FindByDnsNames(TestStoreName, TestStoreLocation, new[] { uniqueDns.ToUpperInvariant() });
 
             // Assert: case differences do not prevent the match.
-            matches.ShouldContain(cert => cert.Thumbprint == certificate.Thumbprint);
+            result.IsError.ShouldBeFalse();
+            result.Value.ShouldContain(cert => cert.Thumbprint == certificate.Thumbprint);
         }
     }
 
     /// <summary>
-    /// A DNS name that no certificate carries must yield no matches.
+    /// A DNS name that no certificate carries must yield a successful but empty result.
     /// </summary>
     [Fact]
     public void FindByDnsNames_ReturnsEmptyWhenNoMatch_Test()
@@ -268,17 +290,17 @@ public class CertificateStoreTests
         string missingDns = UniqueDnsName();
 
         // Act.
-        List<X509Certificate2> matches = CertificateAccess
-            .FindByDnsNames(TestStoreName, TestStoreLocation, new[] { missingDns })
-            .ToList();
+        ErrorOr<IEnumerable<X509Certificate2>> result = CertificateAccess
+            .FindByDnsNames(TestStoreName, TestStoreLocation, new[] { missingDns });
 
-        // Assert: nothing matched.
-        matches.ShouldBeEmpty();
+        // Assert: success with nothing matched.
+        result.IsError.ShouldBeFalse();
+        result.Value.ShouldBeEmpty();
     }
 
     /// <summary>
     /// The match uses <c>All</c> semantics: a certificate is only returned when it carries every
-    /// requested DNS name. Mixing a present name with an absent one must therefore yield no match.
+    /// requested DNS name. Mixing a present name with an absent one must therefore exclude it.
     /// </summary>
     [Fact]
     public void FindByDnsNames_RequiresAllDnsNames_Test()
@@ -290,12 +312,13 @@ public class CertificateStoreTests
         using (new StoreCertificateScope(certificate))
         {
             // Act: ask for both names at once.
-            List<X509Certificate2> matches = CertificateAccess
-                .FindByDnsNames(TestStoreName, TestStoreLocation, new[] { presentDns, absentDns })
-                .ToList();
+            ErrorOr<IEnumerable<X509Certificate2>> result = CertificateAccess
+                .FindByDnsNames(TestStoreName, TestStoreLocation, new[] { presentDns, absentDns });
 
-            // Assert: because one of the requested names is missing, our certificate is excluded.
-            matches.ShouldNotContain(cert => cert.Thumbprint == certificate.Thumbprint);
+            // Assert: success, but because one of the requested names is missing, our certificate is
+            // excluded from the result.
+            result.IsError.ShouldBeFalse();
+            result.Value.ShouldNotContain(cert => cert.Thumbprint == certificate.Thumbprint);
         }
     }
 
@@ -305,7 +328,8 @@ public class CertificateStoreTests
 
     /// <summary>
     /// Creates an ephemeral self-signed certificate suitable for store round-trips, optionally
-    /// carrying an extra custom DNS name in its SAN extension.
+    /// carrying an extra custom DNS name in its SAN extension. The factory call is expected to
+    /// succeed; its <see cref="ErrorOr{TValue}.Value"/> is returned directly.
     /// </summary>
     /// <param name="extraDnsName">
     /// An optional additional DNS name to embed; when <c>null</c> only the default SAN entries are
@@ -319,12 +343,17 @@ public class CertificateStoreTests
             ? Array.Empty<string>()
             : new[] { extraDnsName };
 
-        return CertificateFactory.CreateSelfSigned(
+        ErrorOr<X509Certificate2> result = CertificateFactory.CreateSelfSigned(
             "CN=Forge Store Test",
             "Forge Store Test Certificate",
             dnsNames,
             DateTime.UtcNow.AddDays(-1),
             DateTime.UtcNow.AddDays(1));
+
+        // Certificate creation is a precondition for every store test, not the thing under test, so
+        // assert it succeeded up front to fail fast with a clear message if the environment is wrong.
+        result.IsError.ShouldBeFalse();
+        return result.Value;
     }
 
     /// <summary>
@@ -375,14 +404,16 @@ public class CertificateStoreTests
         private readonly string _thumbprint;
 
         /// <summary>
-        /// Adds <paramref name="certificate"/> to the per-user test store.
+        /// Adds <paramref name="certificate"/> to the per-user test store, asserting the add
+        /// succeeded so a failed precondition surfaces immediately.
         /// </summary>
         /// <param name="certificate">The certificate to add (and later remove).</param>
         public StoreCertificateScope(X509Certificate2 certificate)
         {
             // Remember the thumbprint so Dispose can locate and remove exactly this certificate.
             _thumbprint = certificate.Thumbprint;
-            CertificateAccess.AddToStore(certificate, TestStoreName, TestStoreLocation);
+            CertificateAccess.AddToStore(certificate, TestStoreName, TestStoreLocation)
+                .IsError.ShouldBeFalse();
         }
 
         /// <summary>
@@ -391,7 +422,7 @@ public class CertificateStoreTests
         public void Dispose()
         {
             // RemoveFromStore is a no-op if the certificate is already gone, so Dispose is safe to
-            // call unconditionally.
+            // call unconditionally. The returned ErrorOr is intentionally ignored during cleanup.
             CertificateAccess.RemoveFromStore(_thumbprint, TestStoreName, TestStoreLocation);
         }
     }

@@ -13,7 +13,7 @@
 		<Title>Forge.Next.Security: Forge Patterns and Practices.</Title>
 		<Product>Forge.Next.Security: Forge Patterns and Practices.</Product>
 		<PackageId>Forge.Next.Security</PackageId>
-		<AssemblyVersion>3.0.0.0</AssemblyVersion>
+		<AssemblyVersion>3.1.0.0</AssemblyVersion>
 		<Version>$(AssemblyVersion)</Version>
 		<FileVersion>$(AssemblyVersion)</FileVersion>
 		<Authors>Zoltan Juhasz</Authors>
@@ -41,6 +41,10 @@
 
 	<ItemGroup>
 		<Folder Include="Properties\" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <PackageReference Include="Forge.Next.Shared" Version="3.0.0" />
 	</ItemGroup>
 
 </Project>
