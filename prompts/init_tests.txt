@@ -1,0 +1,8 @@
+Write me a complete set of unit tests for the following project:
+Forge.Next.Security
+
+Put the tests in the project "tests\Forge.Next.Security.Tests". File names should be the same but ends with "Tests" suffix. For example, test file for "PathHelper" class should be "PathHelperTests". Method names should be the same as well with suffix "Test".
+
+Use xunit for your tests. The nuget package libraries used in the project can also be used. You can learn how to write our tests by studying the test projects in the "tests" folder. Follow the patterns.
+NSubstitue is prefered as mock library.
+Richly comment your code, including private and protected methods and their contents.

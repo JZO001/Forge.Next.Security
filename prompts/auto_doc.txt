@@ -1,0 +1,1 @@
+Into the README.md file, write a full user documentation about project "Forge.Next.Security" with examples for each class and each Public methods.
