@@ -2,7 +2,8 @@
 
 This repository holds one NuGet package: a small library for X.509 certificates (self-signed certificates with
 automatic Subject Alternative Names, PFX and CER export and import, certificate-store access) and for password-based AES
-encryption (PBKDF2 key derivation, AES-CBC). Every public method returns an `ErrorOr` result. Read in this order:
+encryption (PBKDF2 key derivation, authenticated AES-GCM, and the legacy AES-CBC format). Every public method returns an
+`ErrorOr` result. Read in this order:
 
 1. `README.md`: the user documentation: every public type and method, with examples. It is packed into the NuGet
    package.
@@ -61,32 +62,55 @@ encryption (PBKDF2 key derivation, AES-CBC). Every public method returns an `Err
 
    The code uses `ErrorOr` and, from Forge.Next.Shared, only the `Protect` extension. Do not add a package without
    asking.
-3. **One source for every target.** The only per-target code is `#if NET8_0` in `CertificateFactory.GetFromRawData` and
-   `GetFromFile`: `net8.0` loads with the `X509Certificate2` constructor, the later targets with
-   `X509CertificateLoader`, which `net8.0` lacks and which replaces the constructors .NET 9 marks obsolete
-   (`SYSLIB0057`). `NET8_0` is defined for `net8.0` only, so a new target takes the loader branch. Both branches use
-   the same storage flags; keep them equal.
+3. **One source for every target.** The only per-target code is two branches in `CertificateFactory`:
+   - `#if NET8_0` in `GetFromRawData` and `GetFromFile`: `net8.0` loads with the `X509Certificate2` constructor, the
+     later targets with `X509CertificateLoader`, which `net8.0` lacks and which replaces the constructors .NET 9 marks
+     obsolete (`SYSLIB0057`). `NET8_0` is defined for `net8.0` only, so a new target takes the loader branch. Both
+     branches pass the method's `keyStorageFlags` unchanged; keep them equal.
+   - `#if NET10_0_OR_GREATER` in `ExportToPfxRawData` (since Release B): `net10.0` and later export with
+     `ExportPkcs12(Pkcs12ExportPbeParameters.Pbes2Aes256Sha256, password)` (PBES2, AES-256-CBC, HMAC-SHA-256, a
+     SHA-256 MAC); `net8.0` and `net9.0`, whose reference packs have no `ExportPkcs12`, keep
+     `Export(X509ContentType.Pfx, password)` (TripleDES, SHA-1). A new target takes the AES branch.
+     `ExportToPfxRawData_Protection_Test` pins both.
 4. **No method throws.** Every public method returns `ErrorOr<T>`:
    - the work runs inside Forge.Next.Shared's `Protect`, which turns every exception into `Unexpected` errors, one per
      exception in the inner-exception chain, with the metadata `type`, `message` and `stackTrace`;
-   - `Validation` only for a null `password` or `salt` in `AesCryptography`, with the parameter's name as the
-     description; `NotFound` only from `FindByThumbprint`;
-   - `AesDecrypt` returns an error only for a null password. Every failure it detects (a malformed or undecodable
-     payload, invalid parameters, a padding error after a wrong password) returns the input unchanged, by design (the
-     README; the 3.1.0 commit: "so a wrong password never discloses the plaintext"). A wrong password is not always
-     detected (see `AI/OPEN.md`).
+   - in `AesCryptography`, `Validation` with the parameter's name as the description for a null argument (`password`,
+     `salt`, and in the GCM methods `content` and `encryptedContent`) and for an `iterations` outside 1 to 6,000,000
+     in `AesGcmEncrypt`;
+   - `AesGcmDecrypt` reports every failure: `Validation` with the code `AesGcm.InvalidPayload` for a malformed
+     payload, `Failure` with the code `AesGcm.AuthenticationFailed` for a wrong password or a changed payload; both
+     GCM methods `Failure` with the code `AesGcm.NotSupported` where `AesGcm.IsSupported` is false;
+   - `NotFound` only from `FindByThumbprint`;
+   - `AesDecrypt` returns an error only for a null password. Every failure it detects, in either format (a malformed
+     or undecodable payload, invalid parameters, a padding error after a wrong password, a `v2:` payload that
+     `AesGcmDecrypt` rejects) returns the input unchanged, by design (the README; the 3.1.0 commit: "so a wrong password
+     never discloses the plaintext"). A wrong password on a legacy payload is not always detected (see `AI/OPEN.md`).
 
    Moving a case between "error", "success" and "the input unchanged" is a behaviour change: version and README.
-5. **The AES payload is stored data.** `AesEncrypt` returns `<Base64 IV>:<Base64 ciphertext>`:
-   - AES-CBC with PKCS#7 padding over the UTF-8 bytes of the content, with a random 16-byte IV per call
-     (`Aes.Create()`);
-   - the key is PBKDF2 (`Rfc2898DeriveBytes.Pbkdf2`) of the UTF-8 password, with the UTF-8 bytes of the IV's Base64
-     text as the salt; the defaults: HMAC-SHA-256, 100,000 iterations, 32 bytes (AES-256);
-   - the payload records none of these parameters, and has no version marker and no MAC.
+5. **The AES payloads are stored data.** Two formats, and `AesDecrypt` must keep reading both:
+   - **legacy**, written by `AesEncrypt` (obsolete since Release B): `<Base64 IV>:<Base64 ciphertext>`:
+     - AES-CBC with PKCS#7 padding over the UTF-8 bytes of the content, with a random 16-byte IV per call
+       (`Aes.Create()`);
+     - the key is PBKDF2 (`Rfc2898DeriveBytes.Pbkdf2`) of the UTF-8 password, with the UTF-8 bytes of the IV's
+       Base64 text as the salt; the defaults: HMAC-SHA-256, 100,000 iterations, 32 bytes (AES-256);
+     - the payload records none of these parameters, and has no version marker and no MAC;
+   - **authenticated**, written by `AesGcmEncrypt`:
+     `v2:<iterations>:<Base64 salt>:<Base64 nonce>:<Base64 ciphertext followed by the tag>`:
+     - the key is PBKDF2-HMAC-SHA256 of the UTF-8 password with a random 16-byte salt, 32 bytes;
+     - AES-256-GCM with a random 12-byte nonce and a 16-byte tag; the associated data is the UTF-8 text before the
+       last colon, so the version, the iterations, the salt and the nonce are authenticated;
+     - the iteration count is in the payload: the default (600,000, a private constant applied at run time, so it is
+       not compiled into the callers) can grow without breaking anything; 1 to 6,000,000 are accepted, and the
+       decrypt checks the count before it runs PBKDF2;
+   - the formats are told apart by the prefix `v2:`, colon included (a legacy Base64 IV starts with `v2` about once in
+     4,096, but never holds a colon);
+   - known-answer payloads of both formats in `AesCryptographyTests` pin them; never regenerate one to make a test
+     pass.
 
-   Changing the format, the salt rule or a default makes the existing payloads undecryptable, and `AesDecrypt` would
-   hide it by returning them unchanged. Do not change any of it silently: a new format needs a marker that tells it
-   apart from this one, and this one must stay readable. Ask Zoltán first.
+   Changing a format, the salt rule or a default of the legacy format makes the existing payloads undecryptable, and
+   `AesDecrypt` would hide it by returning them unchanged. Do not change any of it silently: a further format needs a
+   marker of its own (`v3:`), and both existing formats must stay readable. Ask Zoltán first.
 6. **The certificate profile is behaviour.** `CreateSelfSigned` (and so `GetForLocalhost`) produces, as the README
    documents (the tests check most of it):
    - an RSA key, 2048 bits by default; a SHA-256 signature with PKCS#1 v1.5 padding;
@@ -95,11 +119,15 @@ encryption (PBKDF2 key derivation, AES-CBC). Every public method returns an `Err
    - the Subject Alternative Names: the caller's entries (an IP literal as an IP entry; `127.0.0.1`, `::1`,
      `localhost`, `*` and the machine name skipped, case-insensitively), then always `127.0.0.1`, `::1`, `0.0.0.0`,
      `::`, `0.0.0.0`, `localhost` and the machine name;
-   - the friendly name on Windows only.
+   - the friendly name on Windows only;
+   - the validity times: a `DateTime` whose kind is not UTC is local time, and a result beyond `DateTime`'s range is
+     clamped (`ToUtcDateTimeOffset`, internal, tested with custom time zones through `InternalsVisibleTo`);
+     `GetForLocalhost` ends at 9999-12-31 23:59:59Z in every time zone.
 
-   The password overload of `CreateSelfSigned`, `GetFromRawData` and `GetFromFile` load with
-   `Exportable | PersistKeySet | MachineKeySet`. A change to any of this changes what consumers get: version and
-   README.
+   The password overload of `CreateSelfSigned`, `GetFromRawData` and `GetFromFile` load, unless the caller passes
+   `keyStorageFlags` (since Release B), with `Exportable | PersistKeySet | MachineKeySet` (the private constant
+   `PfxKeyStorageFlags`): a persisted key, because SChannel fails a TLS server handshake with an ephemeral one (verified
+   2026-11-15). A change to any of this changes what consumers get: version and README.
 7. **Secrets stay out of errors, logs and strings.** The package logs nothing; keep it so. No password, salt, key, PFX
    content or plaintext goes into an error's description or metadata: the validation errors name the parameter, never
    its value.

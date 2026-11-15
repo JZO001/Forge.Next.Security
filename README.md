@@ -38,6 +38,8 @@ It is part of the **Forge Patterns and Practices** family.
     - [`MakeAESKey`](#makeaeskey)
     - [`AesEncrypt`](#aesencrypt)
     - [`AesDecrypt`](#aesdecrypt)
+    - [`AesGcmEncrypt`](#aesgcmencrypt)
+    - [`AesGcmDecrypt`](#aesgcmdecrypt)
 - [How Subject Alternative Names are built](#how-subject-alternative-names-are-built)
 - [End-to-end example](#end-to-end-example)
 - [Notes, gotchas & platform behaviour](#notes-gotchas--platform-behaviour)
@@ -53,7 +55,7 @@ It is part of the **Forge Patterns and Practices** family.
 - 🌐 **Automatic Subject Alternative Names (SAN)** — loopback, "any", `localhost` and the machine name are always included, plus any custom DNS names / IP addresses you supply.
 - 💾 **Export & import** to/from PFX (PKCS#12) raw bytes or files, and export the public certificate as a `.cer` (DER) file.
 - 🗄️ **Certificate store management** — add, find (by thumbprint or by DNS name), enumerate and remove certificates from the Windows/OS certificate store.
-- 🧂 **AES encryption** — PBKDF2 key derivation plus AES-CBC encrypt/decrypt with a compact `iv:ciphertext` payload.
+- 🧂 **AES encryption** — PBKDF2 key derivation plus authenticated AES-256-GCM encryption; the legacy AES-CBC `iv:ciphertext` payload stays readable.
 - ✅ **Exception-free API** — every method returns `ErrorOr<T>`; nothing throws for expected failures.
 
 All types live in the **`Forge.Next.Security`** namespace.
@@ -144,7 +146,7 @@ The error kinds this library produces are:
 |-------|----------------|
 | [`CertificateFactory`](#certificatefactory) | Create, export and import self-signed certificates. |
 | [`CertificateAccess`](#certificateaccess) | Read from and write to the OS certificate store; inspect SAN entries. |
-| [`AesCryptography`](#aescryptography) | Derive AES keys (PBKDF2) and encrypt/decrypt strings (AES-CBC). |
+| [`AesCryptography`](#aescryptography) | Derive AES keys (PBKDF2) and encrypt/decrypt strings (authenticated AES-GCM; the legacy AES-CBC format stays readable). |
 
 ---
 
@@ -158,12 +160,12 @@ Creates and manages self-signed certificates. Generated certificates use an **RS
 |--------|---------|---------|
 | `Localhost` | `const string` | The constant `"localhost"`. |
 | `CreateSelfSigned(string, string, IEnumerable<string>, DateTime, DateTime, int)` | `ErrorOr<X509Certificate2>` | Create an in-memory self-signed certificate. |
-| `CreateSelfSigned(string, string, IEnumerable<string>, DateTime, DateTime, string, int)` | `ErrorOr<X509Certificate2>` | Create a certificate and round-trip it through a password-protected PFX (machine key set). |
+| `CreateSelfSigned(string, string, IEnumerable<string>, DateTime, DateTime, string, int, X509KeyStorageFlags)` | `ErrorOr<X509Certificate2>` | Create a certificate and round-trip it through a password-protected PFX (machine key set). |
 | `ExportToPfxRawData(X509Certificate2, string)` | `ErrorOr<byte[]>` | Export the certificate **and** private key as PFX bytes. |
 | `ExportToCerFile(X509Certificate2)` | `ErrorOr<byte[]>` | Export the **public** certificate as DER (`.cer`) bytes. |
 | `GetForLocalhost(string, string, int)` | `ErrorOr<X509Certificate2>` | Create a long-lived certificate for `localhost`. |
-| `GetFromRawData(byte[], string)` | `ErrorOr<X509Certificate2>` | Load a certificate from PFX bytes. |
-| `GetFromFile(string, string?)` | `ErrorOr<X509Certificate2>` | Load a certificate from a PFX file. |
+| `GetFromRawData(byte[], string, X509KeyStorageFlags)` | `ErrorOr<X509Certificate2>` | Load a certificate from PFX bytes. |
+| `GetFromFile(string, string?, X509KeyStorageFlags)` | `ErrorOr<X509Certificate2>` | Load a certificate from a PFX file. |
 
 ---
 
@@ -202,8 +204,8 @@ Creates a brand-new, **in-memory (ephemeral)** self-signed certificate that owns
 | `x500` | `string` | The X.500 subject distinguished name (e.g. `"CN=My Company"`). `null` is treated as an empty subject. |
 | `friendlyName` | `string` | The Windows *friendly name*. Applied only on Windows; ignored on other platforms. |
 | `dnsNames` | `IEnumerable<string>` | Additional DNS names and/or IP addresses to add to the SAN. See [how SANs are built](#how-subject-alternative-names-are-built). |
-| `startTime` | `DateTime` | Validity start (`NotBefore`). |
-| `endTime` | `DateTime` | Validity end (`NotAfter`). |
+| `startTime` | `DateTime` | Validity start (`NotBefore`). A `DateTime` whose `Kind` is not `Utc` is local time. |
+| `endTime` | `DateTime` | Validity end (`NotAfter`), the same way. A local time whose UTC equivalent falls outside `DateTime`'s range (`DateTime.MaxValue` west of UTC, `DateTime.MinValue` east of it) is clamped to the range instead of failing. |
 | `keySize` | `int` | RSA key size in bits. Defaults to `2048`. |
 
 **Example**
@@ -239,12 +241,14 @@ public static ErrorOr<X509Certificate2> CreateSelfSigned(
     DateTime startTime,
     DateTime endTime,
     string password,
-    int keySize = 2048)
+    int keySize = 2048,
+    X509KeyStorageFlags keyStorageFlags =
+        X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.MachineKeySet)
 ```
 
-Same as the overload above, but after creation the certificate is **exported to a password-protected PFX and re-imported** with `X509KeyStorageFlags.Exportable | PersistKeySet | MachineKeySet`. Use this overload when you need the private key persisted in the **machine key store** (for example, a Windows service that must access the key across processes/sessions). The key **stays there** after the certificate is disposed: every call adds one, and nothing in this package removes it (see [Notes](#notes-gotchas--platform-behaviour) for removing one).
+Same as the overload above, but after creation the certificate is **exported to a password-protected PFX and re-imported**, by default with `X509KeyStorageFlags.Exportable | PersistKeySet | MachineKeySet`. Use this overload when you need the private key persisted in the **machine key store** (for example, a Windows service that must access the key across processes/sessions, or a TLS server on Windows: SChannel fails the handshake with an ephemeral key). The key **stays there** after the certificate is disposed: every call adds one, and nothing in this package removes it (see [Notes](#notes-gotchas--platform-behaviour) for removing one).
 
-**Parameters** — identical to the overload above, plus a `password` (the password protecting the intermediate PFX round-trip), with `keySize` moving to the final position.
+**Parameters** — identical to the overload above, plus a `password` (the password protecting the intermediate PFX round-trip), with `keySize` after it, and `keyStorageFlags` last: the flags of the re-import (see [`GetFromRawData`](#getfromrawdata)). Pass `X509KeyStorageFlags.EphemeralKeySet` to keep the key in memory only; macOS has no ephemeral key sets.
 
 **Example**
 
@@ -271,6 +275,15 @@ public static ErrorOr<byte[]> ExportToPfxRawData(X509Certificate2 certificate, s
 ```
 
 Exports the certificate **including its private key** as PFX/PKCS#12 raw bytes, protected by `password`. The result can later be re-imported with [`GetFromRawData`](#getfromrawdata) or [`GetFromFile`](#getfromfile).
+
+The protection depends on the target framework:
+
+| Target | Key and certificate | MAC | Iterations |
+|--------|---------------------|-----|------------|
+| `net10.0`, `net11.0` | PBES2: PBKDF2 with HMAC-SHA-256, AES-256-CBC (`ExportPkcs12` with `Pkcs12ExportPbeParameters.Pbes2Aes256Sha256`) | SHA-256 | 2,000 |
+| `net8.0`, `net9.0` | Legacy `pbeWithSHAAnd3-KeyTripleDES-CBC` (these frameworks have no `ExportPkcs12`) | SHA-1 | 2,000 |
+
+(OpenSSL `pkcs12 -info` on exports made on Windows.) Current Windows, .NET and OpenSSL read both forms; an old importer that reads only the TripleDES form cannot read an export made on `net10.0` or later.
 
 **Example**
 
@@ -315,9 +328,9 @@ if (!cer.IsError)
 public static ErrorOr<X509Certificate2> GetForLocalhost(string subject, string friendlyName, int keySize = 2048)
 ```
 
-Convenience method that creates a self-signed certificate already valid (`NotBefore = yesterday`) and effectively **non-expiring** (`NotAfter = DateTime.MaxValue`, i.e. the year 9999), with the default `localhost` / loopback SAN entries. Ideal for local HTTPS during development.
+Convenience method that creates a self-signed certificate already valid (`NotBefore = yesterday`) and effectively **non-expiring** (`NotAfter` = 9999-12-31 23:59:59 UTC, in every time zone), with the default `localhost` / loopback SAN entries. Ideal for local HTTPS during development.
 
-> ⚠️ **Time zones west of UTC:** `DateTime.MaxValue` is taken as local time. Where the UTC offset is negative, its UTC equivalent passes the year 9999 and the call returns an `ErrorType.Unexpected` error. There, call [`CreateSelfSigned`](#createselfsigned-without-password) with `endTime: DateTime.SpecifyKind(DateTime.MaxValue, DateTimeKind.Utc)`, which ends the certificate at 9999-12-31 23:59:59Z in every time zone. East of UTC, `GetForLocalhost` ends the certificate earlier by the offset (9999-12-31 22:59:59Z at UTC+01:00).
+> **Reading `NotAfter` east of UTC:** `X509Certificate2.NotAfter` is local time, and 9999-12-31 23:59:59 UTC is beyond the last local time a `DateTime` can hold east of UTC, so there the property returns `DateTime.MaxValue` (and `.ToUniversalTime()` of it is earlier by the offset). The time in the certificate itself is 23:59:59 UTC.
 
 **Parameters**
 
@@ -342,11 +355,23 @@ Console.WriteLine(result.Value.NotAfter.Year); // 9999
 #### `GetFromRawData`
 
 ```csharp
-public static ErrorOr<X509Certificate2> GetFromRawData(byte[] certificateData, string password)
+public static ErrorOr<X509Certificate2> GetFromRawData(
+    byte[] certificateData,
+    string password,
+    X509KeyStorageFlags keyStorageFlags =
+        X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.MachineKeySet)
 ```
 
-Loads a certificate (with private key) from PFX/PKCS#12 raw bytes using
+Loads a certificate (with private key) from PFX/PKCS#12 raw bytes, by default with
 `Exportable | PersistKeySet | MachineKeySet`, so the private key stays in the machine key store (see [Notes](#notes-gotchas--platform-behaviour)). The inverse of [`ExportToPfxRawData`](#exporttopfxrawdata).
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `certificateData` | `byte[]` | The PFX/PKCS#12 bytes. |
+| `password` | `string` | The PFX password. |
+| `keyStorageFlags` | `X509KeyStorageFlags` | The storage flags of the load. The default persists the private key in the machine key store, as a Windows TLS server (SChannel) and a key shared across processes need. `X509KeyStorageFlags.EphemeralKeySet` keeps it in memory only and writes nothing to disk (not on macOS). A combination the platform rejects (for example `EphemeralKeySet` with `PersistKeySet`) is returned as an `ErrorType.Unexpected` error. |
 
 **Example**
 
@@ -367,10 +392,14 @@ else
 #### `GetFromFile`
 
 ```csharp
-public static ErrorOr<X509Certificate2> GetFromFile(string certificateFile, string? password)
+public static ErrorOr<X509Certificate2> GetFromFile(
+    string certificateFile,
+    string? password,
+    X509KeyStorageFlags keyStorageFlags =
+        X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.MachineKeySet)
 ```
 
-Loads a certificate (with private key) directly from a PFX file on disk, with the same flags as [`GetFromRawData`](#getfromrawdata), so the private key stays in the machine key store. The `password` may be `null` for a password-less PFX. A missing file or wrong password is returned as an `ErrorType.Unexpected` error rather than thrown.
+Loads a certificate (with private key) directly from a PFX file on disk, with the same default flags as [`GetFromRawData`](#getfromrawdata), so the private key stays in the machine key store. The `password` may be `null` for a password-less PFX. A missing file or wrong password is returned as an `ErrorType.Unexpected` error rather than thrown.
 
 **Parameters**
 
@@ -378,6 +407,14 @@ Loads a certificate (with private key) directly from a PFX file on disk, with th
 |------|------|-------------|
 | `certificateFile` | `string` | Path to the `.pfx` file. |
 | `password` | `string?` | The PFX password, or `null` if the file is not password-protected. |
+| `keyStorageFlags` | `X509KeyStorageFlags` | The storage flags of the load, as in [`GetFromRawData`](#getfromrawdata). |
+
+**Example (a key in memory only)**
+
+```csharp
+ErrorOr<X509Certificate2> inMemory = CertificateFactory.GetFromFile(
+    "mycert.pfx", "S3cr3t!Passw0rd", X509KeyStorageFlags.EphemeralKeySet);
+```
 
 **Example**
 
@@ -567,19 +604,28 @@ ErrorOr<Success> result = CertificateAccess.RemoveFromStore(
 
 > `public static class AesCryptography`
 
-Derives AES keys with **PBKDF2** and performs **AES-CBC** encryption/decryption of strings. Encrypted output is a compact `"<base64 IV>:<base64 ciphertext>"` string; a fresh random IV is generated for every `AesEncrypt` call.
+Derives AES keys with **PBKDF2** and encrypts strings into one of two payload formats:
+
+- **Authenticated (use this):** [`AesGcmEncrypt`](#aesgcmencrypt) writes `"v2:<iterations>:<base64 salt>:<base64 nonce>:<base64 ciphertext and tag>"` with AES-256-GCM. The payload records its parameters, and [`AesGcmDecrypt`](#aesgcmdecrypt) reports a wrong password or a changed payload as an error.
+- **Legacy:** [`AesEncrypt`](#aesencrypt) (obsolete) writes `"<base64 IV>:<base64 ciphertext>"` with AES-CBC and no integrity protection.
+
+[`AesDecrypt`](#aesdecrypt) reads both, so data written in either format keeps decrypting.
 
 | Member | Returns | Summary |
 |--------|---------|---------|
 | `MakeAESKey(string, string, HashAlgorithmName?, int, int)` | `ErrorOr<byte[]>` | Derive a key from a password + salt using PBKDF2. |
-| `AesEncrypt(string, string, HashAlgorithmName?, int, int)` | `ErrorOr<string>` | Encrypt a string; returns `"iv:ciphertext"`. |
-| `AesDecrypt(string, string, HashAlgorithmName?, int, int)` | `ErrorOr<string>` | Decrypt an `"iv:ciphertext"` string. |
-| `Iterations` (constant) | `int` | `100000`: the default PBKDF2 iteration count. |
-| `DefaultOutputLength` (constant) | `int` | `32`: the default key length in bytes (AES-256). |
+| `AesGcmEncrypt(string, string, int?)` | `ErrorOr<string>` | Encrypt a string into the authenticated `"v2:..."` format. |
+| `AesGcmDecrypt(string, string)` | `ErrorOr<string>` | Decrypt a `"v2:..."` payload; an error on any failure. |
+| `AesEncrypt(string, string, HashAlgorithmName?, int, int)` | `ErrorOr<string>` | *Obsolete.* Encrypt a string into the legacy `"iv:ciphertext"` format. |
+| `AesDecrypt(string, string, HashAlgorithmName?, int, int)` | `ErrorOr<string>` | Decrypt a payload of either format; the input back on any failure. |
+| `Iterations` (constant) | `int` | `100000`: the default PBKDF2 iteration count of `MakeAESKey` and the legacy format. |
+| `DefaultOutputLength` (constant) | `int` | `32`: the default key length in bytes (AES-256) of `MakeAESKey` and the legacy format. |
 
-Defaults: `hashAlgorithmName = SHA-256`, `outputLength = DefaultOutputLength` (32 bytes, AES-256), `iterations = Iterations` (100 000). Both are `const`, and optional-parameter defaults are compiled into the calling assembly: a different value in a later package version reaches your code only when you recompile.
+Defaults of `MakeAESKey`, `AesEncrypt` and `AesDecrypt`: `hashAlgorithmName = SHA-256`, `outputLength = DefaultOutputLength` (32 bytes, AES-256), `iterations = Iterations` (100 000). Both are `const`, and optional-parameter defaults are compiled into the calling assembly: a different value in a later package version reaches your code only when you recompile.
 
-The payload does not record these parameters: decrypt with the same `hashAlgorithmName`, `outputLength` and `iterations` you encrypted with.
+The legacy payload does not record these parameters: decrypt it with the same `hashAlgorithmName`, `outputLength` and `iterations` you encrypted with.
+
+**Moving to the authenticated format.** Encrypt new data with `AesGcmEncrypt`. Keep decrypting with `AesDecrypt`, which reads both formats, or switch to `AesGcmDecrypt` once every stored value is in the new format. To convert a stored value, decrypt it with `AesDecrypt` and encrypt the result with `AesGcmEncrypt`. A package version without `AesGcmEncrypt` cannot read the new format: its `AesDecrypt` returns such a payload unchanged.
 
 ---
 
@@ -633,6 +679,8 @@ public static ErrorOr<string> AesEncrypt(
     int iterations = 100000)
 ```
 
+> ⚠️ **Obsolete.** The payload is AES-CBC without integrity protection (see [Security notes](#security-notes)); use [`AesGcmEncrypt`](#aesgcmencrypt) for new data. A call raises warning CS0618, so a project that treats warnings as errors fails to build until it moves to `AesGcmEncrypt` or suppresses the warning. [`AesDecrypt`](#aesdecrypt) keeps reading what `AesEncrypt` wrote.
+
 Encrypts `content` with an AES key derived from `password` (via [`MakeAESKey`](#makeaeskey)) and a fresh random IV, returning `"<base64 IV>:<base64 ciphertext>"`.
 
 - `null` password → `ErrorType.Validation` (`Description = "password"`).
@@ -662,15 +710,19 @@ public static ErrorOr<string> AesDecrypt(
     int iterations = 100000)
 ```
 
-Decrypts a `"<base64 IV>:<base64 ciphertext>"` string produced by [`AesEncrypt`](#aesencrypt), using the **same** password and key-derivation parameters.
+Decrypts a payload of either format:
+
+- a `"<base64 IV>:<base64 ciphertext>"` string produced by [`AesEncrypt`](#aesencrypt), using the **same** password and key-derivation parameters;
+- a `"v2:..."` payload produced by [`AesGcmEncrypt`](#aesgcmencrypt) (told apart by the prefix `v2:`), through [`AesGcmDecrypt`](#aesgcmdecrypt); the payload records its own parameters, so `hashAlgorithmName`, `outputLength` and `iterations` are ignored for it.
 
 Failure handling is deliberately lenient — the only error path is a `null` password (`ErrorType.Validation`). For any non-null password:
 
 - A correct password + valid payload → the original plaintext.
 - `null`/empty/whitespace input → a successful **empty string**.
-- Malformed input (not two colon-separated parts) → returned **unchanged**.
+- Malformed input (not two colon-separated parts, and not a `v2:` payload) → returned **unchanged**.
 - An undecodable payload (bad Base64, wrong lengths) → the original input is returned **unchanged**, thanks to the internal `.Else(...)` fallback.
-- A wrong password → usually the original input **unchanged**: the derived key is wrong, the padding check fails, and the fallback returns the input. In about 0.4 % of the cases (measured: 300 in 80,000 tries) the wrong key still leaves valid padding, and **other text** comes back as a success. The plaintext is never disclosed, but a success does not prove that the password was right: the payload has no integrity check (see [Security notes](#security-notes)).
+- A `v2:` payload that `AesGcmDecrypt` rejects (a wrong password, a changed or malformed payload) → returned **unchanged**. Use `AesGcmDecrypt` itself to get the error.
+- A legacy payload with a wrong password → usually the original input **unchanged**: the derived key is wrong, the padding check fails, and the fallback returns the input. In about 0.4 % of the cases (measured: 300 in 80,000 tries) the wrong key still leaves valid padding, and **other text** comes back as a success. The plaintext is never disclosed, but a success does not prove that the password was right: the legacy payload has no integrity check (see [Security notes](#security-notes)).
 
 **Example**
 
@@ -684,6 +736,82 @@ Console.WriteLine(ok.Value); // Hello, world!
 // A wrong password never reveals the plaintext (it usually returns the input unchanged):
 ErrorOr<string> wrong = AesCryptography.AesDecrypt("not-the-password", payload);
 Console.WriteLine(wrong.Value == "Hello, world!"); // False
+
+// The same call reads the authenticated format:
+string v2 = AesCryptography.AesGcmEncrypt("p@ssword", "Hello, world!").Value;
+Console.WriteLine(AesCryptography.AesDecrypt("p@ssword", v2).Value); // Hello, world!
+```
+
+---
+
+#### `AesGcmEncrypt`
+
+```csharp
+public static ErrorOr<string> AesGcmEncrypt(
+    string password,
+    string content,
+    int? iterations = null)
+```
+
+Encrypts `content` with AES-256-GCM into an authenticated payload:
+
+```
+v2:<iterations>:<base64 salt>:<base64 nonce>:<base64 ciphertext followed by the tag>
+```
+
+- The key is PBKDF2-HMAC-SHA256 of the UTF-8 `password` with a random 16-byte salt (32 bytes); the nonce is random (12 bytes), the tag 16 bytes.
+- The version, the iteration count, the salt and the nonce are authenticated with the ciphertext (as associated data), so a change to any of them is detected.
+- `iterations` is recorded in the payload: from `1` to `6,000,000`. `null` takes the library's current default, **600,000** (the OWASP figure for PBKDF2-HMAC-SHA256), applied at run time, so a later raise reaches your code without a recompile; existing payloads keep the count they were made with.
+- Empty and whitespace-only content is encrypted too, and comes back exactly.
+- The same content encrypted twice yields **different** payloads (random salt and nonce).
+
+Errors:
+
+| Case | Error |
+|------|-------|
+| `null` password or content | `ErrorType.Validation`, `Description` = the parameter's name |
+| `iterations` below 1 or above 6,000,000 | `ErrorType.Validation`, `Description = "iterations"` |
+| The platform has no AES-GCM (`AesGcm.IsSupported` is false) | `ErrorType.Failure`, `Code = "AesGcm.NotSupported"`; there is no fallback to the legacy format |
+
+Every decryption runs PBKDF2 with the payload's iteration count: with the default, about 46 ms on a desktop Intel Core i9-14900KF; slower machines take longer.
+
+**Example**
+
+```csharp
+ErrorOr<string> encrypted = AesCryptography.AesGcmEncrypt("p@ssword", "Hello, world!");
+
+Console.WriteLine(encrypted.Value); // e.g. "v2:600000:x6y+E1gT...==:KU8evXU1...:/878FRsu..."
+```
+
+---
+
+#### `AesGcmDecrypt`
+
+```csharp
+public static ErrorOr<string> AesGcmDecrypt(string password, string encryptedContent)
+```
+
+Decrypts a payload of [`AesGcmEncrypt`](#aesgcmencrypt). Unlike [`AesDecrypt`](#aesdecrypt), it reports every failure as an error, and never returns text for a wrong password or a changed payload:
+
+| Case | Error |
+|------|-------|
+| `null` password or payload | `ErrorType.Validation`, `Description` = the parameter's name |
+| Not a valid payload: not the `v2:` format, Base64 or lengths that do not fit, or an iteration count outside 1 to 6,000,000 (checked before the key is derived, so a payload cannot make a decryption run longer) | `ErrorType.Validation`, `Code = "AesGcm.InvalidPayload"` |
+| A wrong password, or a changed payload | `ErrorType.Failure`, `Code = "AesGcm.AuthenticationFailed"` |
+| The platform has no AES-GCM | `ErrorType.Failure`, `Code = "AesGcm.NotSupported"` |
+
+No error carries the password, the key or any part of the plaintext.
+
+**Example**
+
+```csharp
+string payload = AesCryptography.AesGcmEncrypt("p@ssword", "Hello, world!").Value;
+
+ErrorOr<string> ok = AesCryptography.AesGcmDecrypt("p@ssword", payload);
+Console.WriteLine(ok.Value); // Hello, world!
+
+ErrorOr<string> wrong = AesCryptography.AesGcmDecrypt("not-the-password", payload);
+Console.WriteLine(wrong.FirstError.Code); // AesGcm.AuthenticationFailed
 ```
 
 ---
@@ -778,9 +906,9 @@ app.Run();
 Encrypting and decrypting a secret:
 
 ```csharp
-string token = AesCryptography.AesEncrypt("master-password", "api-key-12345").Value;
-string back  = AesCryptography.AesDecrypt("master-password", token).Value;
-Console.WriteLine(back); // api-key-12345
+string token = AesCryptography.AesGcmEncrypt("master-password", "api-key-12345").Value;
+ErrorOr<string> back = AesCryptography.AesGcmDecrypt("master-password", token);
+Console.WriteLine(back.IsError ? back.FirstError.Code : back.Value); // api-key-12345
 ```
 
 ---
@@ -789,7 +917,7 @@ Console.WriteLine(back); // api-key-12345
 
 - **Exception-free:** expected failures are returned as `ErrorOr` errors, not thrown. Always check `IsError` (or use `Match`/`Switch`) before reading `.Value`.
 - **Friendly names are Windows-only.** `friendlyName` is applied only when running on Windows; on Linux/macOS the property is left empty (the certificate is otherwise identical).
-- **`MachineKeySet` may require elevation, and the keys stay.** The password-based `CreateSelfSigned`, `GetFromRawData` and `GetFromFile` import keys with `Exportable | PersistKeySet | MachineKeySet`. On Windows this writes the private key to the machine key store (a file in `C:\ProgramData\Microsoft\Crypto\Keys`) and usually needs administrator rights; failures surface as `ErrorType.Unexpected`. The key file **stays there** after the certificate is disposed: every call adds one, and nothing in this package removes it. When you no longer need a key, and no certificate in a store still uses it, delete it yourself:
+- **`MachineKeySet` may require elevation, and the keys stay.** The password-based `CreateSelfSigned`, `GetFromRawData` and `GetFromFile` import keys, by default, with `Exportable | PersistKeySet | MachineKeySet`; pass `keyStorageFlags: X509KeyStorageFlags.EphemeralKeySet` where an in-memory key is enough (not for a TLS server on Windows, not on macOS). On Windows this writes the private key to the machine key store (a file in `C:\ProgramData\Microsoft\Crypto\Keys`) and usually needs administrator rights; failures surface as `ErrorType.Unexpected`. The key file **stays there** after the certificate is disposed: every call adds one, and nothing in this package removes it. When you no longer need a key, and no certificate in a store still uses it, delete it yourself:
 
   ```csharp
   using RSA? rsa = certificate.GetRSAPrivateKey();
@@ -800,21 +928,22 @@ Console.WriteLine(back); // api-key-12345
 - **Store write permissions.** `AddToStore`/`RemoveFromStore` against `StoreLocation.CurrentUser` work without elevation; `StoreLocation.LocalMachine` requires administrator rights.
 - **Validity precision.** X.509 stores `NotBefore`/`NotAfter` with whole-second precision, so sub-second parts of your `DateTime` arguments are truncated.
 - **`X509Certificate2.NotBefore` / `NotAfter` are returned in local time.** Convert with `.ToUniversalTime()` before comparing against UTC values.
-- **AES key size.** Through `AesEncrypt`/`AesDecrypt`, `outputLength` must be `16`, `24` or `32` bytes (the derived key becomes `Aes.Key`). `MakeAESKey` on its own accepts any length.
-- **`AesDecrypt` is lenient by design.** With a non-null password it never returns an error: a malformed payload, and almost every wrong password, yields the input unchanged rather than an exception, so it never leaks the plaintext but also will not tell you decryption "failed". Comparing the result against the input catches most failures, not all: about 0.4 % of wrong passwords give other text (see [`AesDecrypt`](#aesdecrypt)).
+- **AES key size.** Through `AesEncrypt`/`AesDecrypt` (the legacy format), `outputLength` must be `16`, `24` or `32` bytes (the derived key becomes `Aes.Key`). `MakeAESKey` on its own accepts any length.
+- **`AesDecrypt` is lenient by design.** With a non-null password it never returns an error: a malformed payload, and almost every wrong password, yields the input unchanged rather than an exception, so it never leaks the plaintext but also will not tell you decryption "failed". For a legacy payload, comparing the result against the input catches most failures, not all: about 0.4 % of wrong passwords give other text (see [`AesDecrypt`](#aesdecrypt)). To get an error instead, use the authenticated format and [`AesGcmDecrypt`](#aesgcmdecrypt).
 - **Disposal.** `X509Certificate2` is `IDisposable`. Dispose certificates you no longer need (e.g. with a `using` statement) to release key material promptly.
 
 ---
 
 ## Security notes
 
-- **The AES payload has no integrity protection.** `AesEncrypt` uses AES-CBC without a MAC, and `AesDecrypt` checks none:
+- **Use the authenticated AES format.** A payload of `AesGcmEncrypt` is AES-256-GCM: a wrong password or any change to the payload fails authentication, and `AesGcmDecrypt` reports it as an error. Its decryption accepts at most 6,000,000 PBKDF2 iterations and checks the count before deriving the key, so a crafted payload cannot make it run for long.
+- **The legacy AES payload has no integrity protection.** `AesEncrypt` (obsolete) uses AES-CBC without a MAC, and `AesDecrypt` checks none for that format:
   - a changed payload can decrypt to changed text as a success (in a test, one flipped ciphertext bit changed one character of the next block);
   - a wrong password gives other text as a success in about 0.4 % of the cases (see [`AesDecrypt`](#aesdecrypt));
   - `AesDecrypt` answers differently to a bad padding (the input back) and a good one (other text), so do not let an untrusted party submit payloads to it and see the result: that makes a padding oracle possible.
 
-  Keep payloads where others cannot change them, or protect them with a MAC of your own.
-- **The PFX export uses legacy protection.** On Windows, `ExportToPfxRawData` writes PKCS#12 protected with TripleDES and SHA-1 and 2,000 iterations (checked with OpenSSL). A PFX with a weak password is cheap to attack offline: give a PFX you keep a long random password, and store it where others cannot read it.
+  Move such data to `AesGcmEncrypt` (see [`AesCryptography`](#aescryptography)); until then keep the payloads where others cannot change them.
+- **The PFX export's work factor is low.** `ExportToPfxRawData` protects the PFX with AES-256 on `net10.0` and later, and with the legacy TripleDES and SHA-1 on `net8.0` and `net9.0` (see [`ExportToPfxRawData`](#exporttopfxrawdata)); either way the password is stretched with only 2,000 iterations. A PFX with a weak password is cheap to attack offline: give a PFX you keep a long random password, and store it where others cannot read it.
 - **Errors carry stack traces.** Every `ErrorType.Unexpected` error carries the exception's `type`, `message` and `stackTrace` in its `Metadata`. Before you send an error out of your process (an HTTP response, a message to another service), remove the metadata, or at least the `stackTrace`.
 - **No secrets in this package's own errors.** The package logs nothing, and its `Validation` errors name the parameter, never its value.
 

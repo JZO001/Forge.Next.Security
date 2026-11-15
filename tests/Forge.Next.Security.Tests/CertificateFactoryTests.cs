@@ -1,4 +1,5 @@
 using ErrorOr;
+using System.Formats.Asn1;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -505,6 +506,28 @@ public class CertificateFactoryTests : IDisposable
         AlternateNamesOf(certificate).ShouldContain(customDns);
     }
 
+    /// <summary>
+    /// The password overload passes its optional <c>keyStorageFlags</c> to the PFX load: with
+    /// <see cref="X509KeyStorageFlags.EphemeralKeySet"/> the private key stays in memory, and nothing is
+    /// written to the machine key store. (macOS has no ephemeral key sets.)
+    /// </summary>
+    [Fact]
+    public void CreateSelfSigned_WithPasswordAndEphemeralKeySet_Test()
+    {
+        if (OperatingSystem.IsMacOS()) return;
+
+        // Act.
+        ErrorOr<X509Certificate2> result = CertificateFactory.CreateSelfSigned(
+            Subject, FriendlyName, Array.Empty<string>(),
+            DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1), Password,
+            keyStorageFlags: X509KeyStorageFlags.EphemeralKeySet);
+
+        // Assert: the private key is there, and on Windows it is ephemeral.
+        result.IsError.ShouldBeFalse();
+        result.Value.HasPrivateKey.ShouldBeTrue();
+        if (OperatingSystem.IsWindows()) IsEphemeralKey(result.Value).ShouldBeTrue();
+    }
+
     #endregion
 
     #region ExportToPfxRawData
@@ -531,6 +554,38 @@ public class CertificateFactoryTests : IDisposable
         reimported.IsError.ShouldBeFalse();
         reimported.Value.Thumbprint.ShouldBe(certificate.Thumbprint);
         reimported.Value.HasPrivateKey.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// The PFX protection differs per target. From <c>net10.0</c> the export uses
+    /// <c>ExportPkcs12(Pkcs12ExportPbeParameters.Pbes2Aes256Sha256, ...)</c>: PBES2 with PBKDF2
+    /// (HMAC-SHA-256) and AES-256-CBC. <c>net8.0</c> and <c>net9.0</c> have no <c>ExportPkcs12</c> and
+    /// keep the legacy pbeWithSHAAnd3-KeyTripleDES-CBC (pinned on Windows, where OpenSSL showed it).
+    /// The test looks for the algorithms' object identifiers, which a PKCS#12 file carries in the clear.
+    /// </summary>
+    [Fact]
+    public void ExportToPfxRawData_Protection_Test()
+    {
+        // Arrange + Act.
+        X509Certificate2 certificate = CreateCertificate().Value;
+        byte[] pfx = CertificateFactory.ExportToPfxRawData(certificate, Password).Value;
+
+        bool pbes2 = ContainsOid(pfx, "1.2.840.113549.1.5.13");
+        bool aes256Cbc = ContainsOid(pfx, "2.16.840.1.101.3.4.1.42");
+        bool hmacSha256 = ContainsOid(pfx, "1.2.840.113549.2.9");
+        bool tripleDes = ContainsOid(pfx, "1.2.840.113549.1.12.1.3");
+
+#if NET10_0_OR_GREATER
+        // Assert (net10.0 and later): PBES2, AES-256-CBC, HMAC-SHA-256; no TripleDES.
+        pbes2.ShouldBeTrue();
+        aes256Cbc.ShouldBeTrue();
+        hmacSha256.ShouldBeTrue();
+        tripleDes.ShouldBeFalse();
+#else
+        // Assert (net8.0, net9.0): no PBES2; the legacy TripleDES on Windows.
+        pbes2.ShouldBeFalse();
+        if (OperatingSystem.IsWindows()) tripleDes.ShouldBeTrue();
+#endif
     }
 
     #endregion
@@ -596,6 +651,102 @@ public class CertificateFactoryTests : IDisposable
 
         // Assert: it is usable for localhost connections.
         AlternateNamesOf(certificate).ShouldContain(CertificateFactory.Localhost);
+    }
+
+    /// <summary>
+    /// <see cref="CertificateFactory.GetForLocalhost"/> ends the certificate at 9999-12-31 23:59:59 UTC
+    /// in every time zone: it passes a UTC <see cref="DateTime.MaxValue"/>. (Before, a local
+    /// <c>DateTime.MaxValue</c> ended it earlier east of UTC and failed west of it.) The test reads the
+    /// time encoded in the certificate: east of UTC <see cref="X509Certificate2.NotAfter"/> cannot show
+    /// it in local time and returns the clamped <see cref="DateTime.MaxValue"/>.
+    /// </summary>
+    [Fact]
+    public void GetForLocalhost_EndsAtTheEndOf9999Utc_Test()
+    {
+        // Act.
+        ErrorOr<X509Certificate2> result = CertificateFactory.GetForLocalhost(Subject, FriendlyName);
+
+        // Assert.
+        result.IsError.ShouldBeFalse();
+        EncodedNotAfter(result.Value).ShouldBe(new DateTimeOffset(9999, 12, 31, 23, 59, 59, TimeSpan.Zero));
+    }
+
+    #endregion
+
+    #region Validity times
+
+    // ---------------------------------------------------------------------------------------------
+    // CreateSelfSigned converts its DateTime arguments with CertificateFactory.ToUtcDateTimeOffset
+    // (internal, visible to the tests), taking the time zone as a parameter, so the tests can pass
+    // zones west and east of UTC on any machine.
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>A custom time zone five hours west of UTC, without daylight saving.</summary>
+    private static readonly TimeZoneInfo WestOfUtc =
+        TimeZoneInfo.CreateCustomTimeZone("Test-05:00", TimeSpan.FromHours(-5), "Test-05:00", "Test-05:00");
+
+    /// <summary>A custom time zone one hour east of UTC, without daylight saving.</summary>
+    private static readonly TimeZoneInfo EastOfUtc =
+        TimeZoneInfo.CreateCustomTimeZone("Test+01:00", TimeSpan.FromHours(1), "Test+01:00", "Test+01:00");
+
+    /// <summary>
+    /// A local <see cref="DateTime.MaxValue"/> west of UTC passes the year 9999 in UTC; the conversion
+    /// clamps it to the end of <see cref="DateTime"/>'s range instead of throwing (which made
+    /// <c>GetForLocalhost</c> fail there).
+    /// </summary>
+    [Fact]
+    public void ToUtcDateTimeOffset_LocalMaxValueWestOfUtcIsClamped_Test()
+    {
+        // Act.
+        DateTimeOffset result = CertificateFactory.ToUtcDateTimeOffset(DateTime.MaxValue, WestOfUtc);
+
+        // Assert.
+        result.Offset.ShouldBe(TimeSpan.Zero);
+        result.UtcTicks.ShouldBe(DateTime.MaxValue.Ticks);
+    }
+
+    /// <summary>
+    /// East of UTC a local <see cref="DateTime.MaxValue"/> converts as before: earlier by the offset.
+    /// </summary>
+    [Fact]
+    public void ToUtcDateTimeOffset_LocalMaxValueEastOfUtc_Test()
+    {
+        // Act.
+        DateTimeOffset result = CertificateFactory.ToUtcDateTimeOffset(DateTime.MaxValue, EastOfUtc);
+
+        // Assert.
+        result.UtcTicks.ShouldBe(DateTime.MaxValue.Ticks - TimeSpan.FromHours(1).Ticks);
+    }
+
+    /// <summary>
+    /// A local <see cref="DateTime.MinValue"/> east of UTC falls before the year 1 in UTC; the
+    /// conversion clamps it to the start of <see cref="DateTime"/>'s range instead of throwing.
+    /// </summary>
+    [Fact]
+    public void ToUtcDateTimeOffset_LocalMinValueEastOfUtcIsClamped_Test()
+    {
+        // Act.
+        DateTimeOffset result = CertificateFactory.ToUtcDateTimeOffset(DateTime.MinValue, EastOfUtc);
+
+        // Assert.
+        result.UtcTicks.ShouldBe(DateTime.MinValue.Ticks);
+    }
+
+    /// <summary>
+    /// A time within the range converts as <c>new DateTimeOffset(time)</c> did: a time whose kind is not
+    /// UTC is local time in the zone, a UTC time keeps its value.
+    /// </summary>
+    [Fact]
+    public void ToUtcDateTimeOffset_TimeWithinTheRange_Test()
+    {
+        // Arrange: noon on a summer day, as local (unspecified) and as UTC time.
+        DateTime noon = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Unspecified);
+        DateTime noonUtc = DateTime.SpecifyKind(noon, DateTimeKind.Utc);
+
+        // Act + Assert: local noon is 17:00 UTC at -05:00 and 11:00 UTC at +01:00; UTC noon stays.
+        CertificateFactory.ToUtcDateTimeOffset(noon, WestOfUtc).UtcDateTime.ShouldBe(noon.AddHours(5));
+        CertificateFactory.ToUtcDateTimeOffset(noon, EastOfUtc).UtcDateTime.ShouldBe(noon.AddHours(-1));
+        CertificateFactory.ToUtcDateTimeOffset(noonUtc, WestOfUtc).UtcDateTime.ShouldBe(noon);
     }
 
     #endregion
@@ -669,6 +820,51 @@ public class CertificateFactoryTests : IDisposable
         result.IsError.ShouldBeTrue();
         result.FirstError.Type.ShouldBe(ErrorType.Unexpected);
 #endif
+    }
+
+    /// <summary>
+    /// Without <c>keyStorageFlags</c> the load keeps today's flags,
+    /// <c>Exportable | PersistKeySet | MachineKeySet</c>: on Windows the private key is persisted, not
+    /// ephemeral (SChannel needs a persisted key for a TLS server).
+    /// </summary>
+    [Fact]
+    public void GetFromRawData_PersistsKeyByDefault_Test()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        // Arrange.
+        X509Certificate2 original = CreateCertificate().Value;
+        byte[] pfx = CertificateFactory.ExportToPfxRawData(original, Password).Value;
+
+        // Act.
+        ErrorOr<X509Certificate2> result = DeleteKeyAfterTest(CertificateFactory.GetFromRawData(pfx, Password));
+
+        // Assert.
+        result.IsError.ShouldBeFalse();
+        IsEphemeralKey(result.Value).ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// With <see cref="X509KeyStorageFlags.EphemeralKeySet"/> the private key is loaded into memory
+    /// only, so the load leaves no key file behind. (macOS has no ephemeral key sets.)
+    /// </summary>
+    [Fact]
+    public void GetFromRawData_EphemeralKeySet_Test()
+    {
+        if (OperatingSystem.IsMacOS()) return;
+
+        // Arrange.
+        X509Certificate2 original = CreateCertificate().Value;
+        byte[] pfx = CertificateFactory.ExportToPfxRawData(original, Password).Value;
+
+        // Act.
+        ErrorOr<X509Certificate2> result = CertificateFactory.GetFromRawData(pfx, Password, X509KeyStorageFlags.EphemeralKeySet);
+
+        // Assert: the same certificate with its private key, ephemeral on Windows.
+        result.IsError.ShouldBeFalse();
+        result.Value.Thumbprint.ShouldBe(original.Thumbprint);
+        result.Value.HasPrivateKey.ShouldBeTrue();
+        if (OperatingSystem.IsWindows()) IsEphemeralKey(result.Value).ShouldBeTrue();
     }
 
     #endregion
@@ -788,6 +984,39 @@ public class CertificateFactoryTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// <see cref="CertificateFactory.GetFromFile"/> passes its optional <c>keyStorageFlags</c> to the
+    /// load: with <see cref="X509KeyStorageFlags.EphemeralKeySet"/> the private key stays in memory.
+    /// (macOS has no ephemeral key sets.)
+    /// </summary>
+    [Fact]
+    public void GetFromFile_EphemeralKeySet_Test()
+    {
+        if (OperatingSystem.IsMacOS()) return;
+
+        // Arrange: write a PFX blob to a unique temporary file.
+        X509Certificate2 original = CreateCertificate().Value;
+        byte[] pfx = CertificateFactory.ExportToPfxRawData(original, Password).Value;
+        string path = Path.Combine(Path.GetTempPath(), $"forge-cert-{Guid.NewGuid():N}.pfx");
+        File.WriteAllBytes(path, pfx);
+
+        try
+        {
+            // Act.
+            ErrorOr<X509Certificate2> result = CertificateFactory.GetFromFile(path, Password, X509KeyStorageFlags.EphemeralKeySet);
+
+            // Assert: the same certificate with its private key, ephemeral on Windows.
+            result.IsError.ShouldBeFalse();
+            result.Value.Thumbprint.ShouldBe(original.Thumbprint);
+            result.Value.HasPrivateKey.ShouldBeTrue();
+            if (OperatingSystem.IsWindows()) IsEphemeralKey(result.Value).ShouldBeTrue();
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     #endregion
 
     #region Private helpers
@@ -819,6 +1048,62 @@ public class CertificateFactoryTests : IDisposable
         {
             cng.Key.Delete();
         }
+    }
+
+    /// <summary>
+    /// Tells whether the data holds the DER encoding of an object identifier.
+    /// </summary>
+    /// <param name="data">The data to search, e.g. a PFX.</param>
+    /// <param name="oid">The object identifier in dotted form.</param>
+    /// <returns><c>true</c> when the encoded identifier occurs in the data.</returns>
+    private static bool ContainsOid(byte[] data, string oid)
+    {
+        AsnWriter writer = new AsnWriter(AsnEncodingRules.DER);
+        writer.WriteObjectIdentifier(oid);
+        return data.AsSpan().IndexOf(writer.Encode()) >= 0;
+    }
+
+    /// <summary>
+    /// Reads the <c>notAfter</c> time encoded in the certificate (its TBSCertificate's validity), not the
+    /// <see cref="X509Certificate2.NotAfter"/> property, which converts it to local time and clamps what
+    /// local time cannot show.
+    /// </summary>
+    /// <param name="certificate">The certificate.</param>
+    /// <returns>The encoded <c>notAfter</c>, in UTC.</returns>
+    private static DateTimeOffset EncodedNotAfter(X509Certificate2 certificate)
+    {
+        AsnReader tbsCertificate = new AsnReader(certificate.RawData, AsnEncodingRules.DER)
+            .ReadSequence()
+            .ReadSequence();
+
+        // version [0] (optional), serialNumber, signature, issuer, then the validity sequence.
+        if (tbsCertificate.PeekTag().HasSameClassAndValue(new Asn1Tag(TagClass.ContextSpecific, 0)))
+            tbsCertificate.ReadEncodedValue();
+        tbsCertificate.ReadEncodedValue();
+        tbsCertificate.ReadEncodedValue();
+        tbsCertificate.ReadEncodedValue();
+
+        AsnReader validity = tbsCertificate.ReadSequence();
+        validity.ReadEncodedValue();
+
+        return validity.PeekTag().HasSameClassAndValue(Asn1Tag.UtcTime)
+            ? validity.ReadUtcTime()
+            : validity.ReadGeneralizedTime();
+    }
+
+    /// <summary>
+    /// Tells whether the certificate's private key is ephemeral (in memory only) rather than persisted.
+    /// Windows only: CNG reports it on the key (<see cref="CngKey.IsEphemeral"/>).
+    /// </summary>
+    /// <param name="certificate">A certificate with a private RSA key.</param>
+    /// <returns><c>true</c> when the key is ephemeral.</returns>
+    private static bool IsEphemeralKey(X509Certificate2 certificate)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("CNG keys are Windows-only.");
+
+        using RSA? rsa = certificate.GetRSAPrivateKey();
+        rsa.ShouldBeOfType<RSACng>();
+        return ((RSACng)rsa).Key.IsEphemeral;
     }
 
     /// <summary>

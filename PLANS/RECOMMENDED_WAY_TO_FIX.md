@@ -23,7 +23,8 @@ and needs Zoltán's decision.
 - **Release A**, without a change of behaviour or of a signature (a patch): A1 to A5. It also carries what Zoltán
   added on 2026-11-15: the `net11.0` target and Forge.Next.Shared 3.3.2. Done on 2026-11-15 as 3.2.1 (with B6),
   committed before Release B.
-- **Release B**, new API and changed behaviour (at least a minor): B1 to B6.
+- **Release B**, new API and changed behaviour (at least a minor): B1 to B6. Done on 2026-11-15 as 3.3.0 (B6 went
+  with Release A).
 
 Zoltán decides whether they ship apart. Before the first Release build of a release, ask which version is next and raise
 `AssemblyVersion`: `artifacts/` holds 3.2.0, and a Release build of the current version overwrites it. Never publish
@@ -91,7 +92,7 @@ Correct the README to the code as it is (the list in `AI/OPEN.md`):
 
 ## Release B
 
-### B1. An authenticated AES payload [ ] (Decided 2026-11-15: (a), the format and the refinements below)
+### B1. An authenticated AES payload [x] 2026-11-15 (Decided 2026-11-15: (a), the format and the refinements below)
 
 - **Problem:** `AesEncrypt` is AES-CBC without a MAC. One flipped ciphertext bit decrypted to altered text as a success
   ("fox" became "gox"); a wrong password was missed in 300 of 80,000 tries; and since `AesDecrypt` answers differently
@@ -135,7 +136,7 @@ Correct the README to the code as it is (the list in `AI/OPEN.md`):
 - **Docs:** README (the new methods, the format, the migration: read old, write new), `CLAUDE.md` invariant 4 (the new
   methods' errors) and invariant 5 (two formats, both readable), `AI/DESIGN.md`, `AI/HISTORY.md`.
 
-### B2. The PBKDF2 iterations of the new format [ ] (Decided 2026-11-15: 600,000, after the check below)
+### B2. The PBKDF2 iterations of the new format [x] 2026-11-15 (Decided 2026-11-15: 600,000, after the check below; OWASP still gives 600,000; 46 ms per decrypt on the development machine, the slowest machine still to name)
 
 - The new format records its iterations, so a later default can grow without breaking anything.
 - **Recommended:** 600,000, the figure the OWASP Password Storage Cheat Sheet gave for PBKDF2-HMAC-SHA256. Check the
@@ -144,7 +145,7 @@ Correct the README to the code as it is (the list in `AI/OPEN.md`):
 - The new default is applied at run time (`int? iterations = null`, see B1), not as a new public constant.
 - Should the check show a different current figure, or the measurement an unbearable decrypt, go back to Zoltán.
 
-### B3. The PFX export's protection [ ] (Decided 2026-11-15: AES on `net10.0` and later, today's export on `net8.0` and `net9.0`)
+### B3. The PFX export's protection [x] 2026-11-15 (Decided 2026-11-15: AES on `net10.0` and later, today's export on `net8.0` and `net9.0`; Zoltán: every importer is modern)
 
 - **Problem:** `ExportToPfxRawData` writes TripleDES and SHA-1 with 2,000 iterations (OpenSSL, 2026-11-11), cheap to
   attack offline with a weak password, while the README suggests keeping a PFX as a backup.
@@ -160,7 +161,7 @@ Correct the README to the code as it is (the list in `AI/OPEN.md`):
   `CLAUDE.md` invariant 3 changes with it.
 - **Check:** `openssl pkcs12 -in <file> -info -noout` on an export of each target.
 
-### B4. The keys left in the machine key store [ ] (Decided 2026-11-15: the optional parameter, today's flags as its default)
+### B4. The keys left in the machine key store [x] 2026-11-15 (Decided 2026-11-15: the optional parameter, today's flags as its default)
 
 - **Problem:** the password overload of `CreateSelfSigned`, `GetFromRawData` and `GetFromFile` load with
   `Exportable | PersistKeySet | MachineKeySet`, and nothing removes the key file; one test run left four in
@@ -173,7 +174,7 @@ Correct the README to the code as it is (the list in `AI/OPEN.md`):
   the folder's file count before and after a run. Since A4 the tests already delete the persisted keys
   (`CertificateFactoryTests.Dispose`); keep that for the tests of the default flags.
 
-### B5. `GetForLocalhost` west of UTC [ ] (Decided 2026-11-15: accepted)
+### B5. `GetForLocalhost` west of UTC [x] 2026-11-15 (Decided 2026-11-15: accepted)
 
 - **Problem:** `NotAfter` is `DateTime.MaxValue`, whose kind is not UTC, so `new DateTimeOffset(endTime)` applies the
   local offset. West of UTC the UTC time passes year 9999 and the call returns `Unexpected` (verified on Linux with

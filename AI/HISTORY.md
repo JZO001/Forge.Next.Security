@@ -193,3 +193,70 @@ Zoltán chose 3.2.1 for Release A (A1 to A5, B6, with the `net11.0` target and F
 API or behaviour changed, and Forge.Next.Shared added `net11.0` in a patch too (3.3.1). `AssemblyVersion` 3.2.0.0 →
 3.2.1.0. Release A is committed before Release B starts; the Release build into `artifacts/` and the publishing are
 Zoltán's.
+
+## 2026-11-15 – B1 and B2: the authenticated AES format
+
+As decided (see "The decisions of the fix plan"), `AesCryptography` gets two methods and a second payload format:
+- `AesGcmEncrypt(password, content, int? iterations = null)` writes
+  `v2:<iterations>:<Base64 salt>:<Base64 nonce>:<Base64 ciphertext and tag>`: PBKDF2-HMAC-SHA256 with a random 16-byte
+  salt, AES-256-GCM with a random 12-byte nonce and a 16-byte tag, the text before the last colon as associated data.
+  Empty and whitespace-only content is encrypted too.
+- `AesGcmDecrypt(password, encryptedContent)` returns errors: `Validation` `AesGcm.InvalidPayload`, `Failure`
+  `AesGcm.AuthenticationFailed`, and `Failure` `AesGcm.NotSupported` where the platform has no AES-GCM (a third code,
+  beside the two the plan proposed). The iteration count of a payload must be 1 to 6,000,000, checked before PBKDF2.
+- `AesDecrypt` hands a payload starting with `v2:` to `AesGcmDecrypt` and turns its errors into the unchanged input.
+- `AesEncrypt` is `[Obsolete]`; the tests of the legacy format suppress CS0618 around their regions.
+
+B2: OWASP's Password Storage Cheat Sheet, read on 2026-11-15, still gives 600,000 iterations for PBKDF2-HMAC-SHA256
+(220,000 for SHA-512, 1,400,000 for SHA-1); the page shows no date. The default is the private constant
+`GcmDefaultIterations`, applied at run time. One decrypt took 46 ms on the development machine; the plan's measurement
+on the slowest machine waits for Zoltán to name one (`OPEN.md`).
+
+The legacy format is unchanged, and its known-answer tests (A3) still pass. A new known-answer payload pins the
+authenticated format; Node.js decrypted it independently. Release B is a minor version (new API, an `[Obsolete]`);
+its number is asked before its Release build.
+
+## 2026-11-15 – B4: the key storage flags
+
+The plan asked first why the PFX loads persist the key. A loopback `SslStream` probe on Windows answered it: SChannel
+fails a TLS server handshake with an ephemeral key ("No credentials are available in the security package") and
+completes it with a persisted one. So the default stays, and the password overload of `CreateSelfSigned`,
+`GetFromRawData` and `GetFromFile` get an optional last parameter, `X509KeyStorageFlags keyStorageFlags`, whose default
+is today's `Exportable | PersistKeySet | MachineKeySet` (the private constant `PfxKeyStorageFlags`, used by both
+`#if NET8_0` branches). `EphemeralKeySet` loads the key into memory only. No behaviour change for a caller that passes
+nothing; but the three signatures changed, so a caller compiled against an earlier version must be recompiled (the
+old method no longer exists in the assembly): a minor version, as for `keySize` in 3.1.0. The README documents the
+parameter, why the default persists, and the ephemeral option; tests pin the persisted default (Windows) and the
+ephemeral loads of all three methods.
+
+## 2026-11-15 – B5: `GetForLocalhost` in every time zone
+
+As decided: `GetForLocalhost` passes `DateTime.SpecifyKind(DateTime.MaxValue, DateTimeKind.Utc)`, so its certificate
+ends at 9999-12-31 23:59:59Z everywhere; east of UTC that is later than before by the offset (22:59:59Z at +01:00),
+west of UTC the call no longer fails. `CreateSelfSigned` converts both times through the internal
+`ToUtcDateTimeOffset(time, zone)`, which computes as `new DateTimeOffset(time)` did but clamps a result beyond
+`DateTime`'s range, so a caller's local `DateTime.MaxValue` west of UTC (or `DateTime.MinValue` east of it) gives a
+certificate instead of an `Unexpected` error: a behaviour change from error to success. The library's project file got
+`InternalsVisibleTo` for the test assembly, so the tests pass custom zones (-05:00, +01:00). The README's work-around
+note is replaced by the new behaviour and a note on reading `NotAfter` east of UTC.
+
+## 2026-11-15 – B3: the PFX export; B2's measurement
+
+Before B3, the plan asked whether every system that imports these PFX files reads the AES form. Zoltán: every importer
+is modern. So `ExportToPfxRawData` exports, on `net10.0` and later, with
+`ExportPkcs12(Pkcs12ExportPbeParameters.Pbes2Aes256Sha256, password)` (PBES2, AES-256-CBC, HMAC-SHA-256, a SHA-256
+MAC), behind `#if NET10_0_OR_GREATER`, a second per-target branch (`CLAUDE.md` invariant 3); `net8.0` and `net9.0`
+keep the TripleDES export. The password overload of `CreateSelfSigned` round-trips through it, so its intermediate PFX
+changes too, without a visible effect. A behaviour change for a caller on `net10.0` or later: an importer that reads
+only TripleDES can no longer read the export (README). Both forms keep 2,000 iterations; a higher count is an idea in
+`OPEN.md`, not decided.
+
+On B2, Zoltán decided that no measurement on a slower machine is needed: 600,000 stays.
+
+## 2026-11-15 – 3.3.0: Release B
+
+Zoltán chose 3.3.0 for Release B (B1 to B5), committed after B3: a minor version, for the new API (`AesGcmEncrypt`,
+`AesGcmDecrypt`), the `[Obsolete]` on `AesEncrypt`, the changed signatures of the three PFX loads (a recompile is
+needed), and the changed behaviour (the PFX export on `net10.0` and later, `GetForLocalhost`'s `NotAfter`, the clamped
+validity times). `AssemblyVersion` 3.2.1.0 → 3.3.0.0. The Release build into `artifacts/` and the publishing are
+Zoltán's.

@@ -1,5 +1,7 @@
 using ErrorOr;
+using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using Shouldly;
 using Xunit;
 
@@ -192,6 +194,11 @@ public class AesCryptographyTests
     }
 
     #endregion
+
+    // AesEncrypt is [Obsolete] since AesGcmEncrypt came: it writes the AES-CBC format without integrity
+    // protection. The tests below pin that format on purpose, as long as AesDecrypt must read it, so the
+    // warning is suppressed from here to the end of the "AesDecrypt" region (and only there).
+#pragma warning disable CS0618 // Type or member is obsolete
 
     #region AesEncrypt
 
@@ -415,6 +422,8 @@ public class AesCryptographyTests
 
     #endregion
 
+#pragma warning restore CS0618 // Type or member is obsolete
+
     #region Known-answer payloads
 
     // ---------------------------------------------------------------------------------------------
@@ -491,6 +500,401 @@ public class AesCryptographyTests
         result.IsError.ShouldBeFalse();
         result.Value.ShouldNotBe(PlainText);
         result.Value.ShouldBe(KnownPayloadWithSha512And5000Iterations);
+    }
+
+    #endregion
+
+    #region AesGcmEncrypt / AesGcmDecrypt
+
+    // ---------------------------------------------------------------------------------------------
+    // The authenticated format: "v2:<iterations>:<Base64 salt>:<Base64 nonce>:<Base64 ciphertext
+    // followed by the tag>". Most tests pass iterations: 1, so PBKDF2 does not dominate the run: the
+    // payload records its count, so a low count makes as valid a payload as the default.
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>The salt part of <see cref="KnownGcmPayload"/> (16 bytes).</summary>
+    private const string KnownGcmSalt = "x6y+E1gTvgk9FUjXC3GN0Q==";
+
+    /// <summary>The nonce part of <see cref="KnownGcmPayload"/> (12 bytes).</summary>
+    private const string KnownGcmNonce = "KU8evXU1lUQrsd0f";
+
+    /// <summary>The ciphertext and tag part of <see cref="KnownGcmPayload"/>.</summary>
+    private const string KnownGcmSealed =
+        "/878FRsuXxxGcxNBhxTtMTosv407EcBkVkECeexxLBGTOd/wipI47bRzT7rnfVzm8czOmotCxdJhMPg2";
+
+    /// <summary>
+    /// <see cref="PlainText"/> encrypted by <see cref="AesCryptography.AesGcmEncrypt"/> with
+    /// <see cref="Password"/> and 10,000 iterations, made once on 2026-11-15 and decrypted
+    /// independently with Node.js (PBKDF2-HMAC-SHA256, then AES-256-GCM with the text before the last
+    /// colon as the associated data). It pins the stored format; never regenerate it to make a test
+    /// pass.
+    /// </summary>
+    private const string KnownGcmPayload =
+        "v2:10000:" + KnownGcmSalt + ":" + KnownGcmNonce + ":" + KnownGcmSealed;
+
+    /// <summary>
+    /// Encrypting must yield five colon-separated parts: the version, the default iteration count
+    /// (600,000), a 16-byte salt, a 12-byte nonce, and the ciphertext followed by a 16-byte tag.
+    /// </summary>
+    [Fact]
+    public void AesGcmEncryptTest()
+    {
+        // Act: encrypt with the library's default iteration count.
+        ErrorOr<string> result = AesCryptography.AesGcmEncrypt(Password, PlainText);
+
+        // Assert: the format, part by part.
+        result.IsError.ShouldBeFalse();
+        string[] parts = result.Value.Split(':');
+        parts.Length.ShouldBe(5);
+        parts[0].ShouldBe("v2");
+        parts[1].ShouldBe("600000");
+        Convert.FromBase64String(parts[2]).Length.ShouldBe(16);
+        Convert.FromBase64String(parts[3]).Length.ShouldBe(12);
+        Convert.FromBase64String(parts[4]).Length.ShouldBe(Encoding.UTF8.GetByteCount(PlainText) + 16);
+    }
+
+    /// <summary>
+    /// A payload made with the default iteration count must decrypt back to the plaintext.
+    /// </summary>
+    [Fact]
+    public void AesGcmDecryptTest()
+    {
+        // Arrange.
+        string payload = AesCryptography.AesGcmEncrypt(Password, PlainText).Value;
+
+        // Act.
+        ErrorOr<string> result = AesCryptography.AesGcmDecrypt(Password, payload);
+
+        // Assert.
+        result.IsError.ShouldBeFalse();
+        result.Value.ShouldBe(PlainText);
+    }
+
+    /// <summary>
+    /// Unlike <c>AesEncrypt</c>, the authenticated format encrypts empty and whitespace-only content
+    /// too, and gives it back exactly.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\t\r\n")]
+    public void AesGcmEncrypt_EmptyAndWhitespaceContentRoundTrip_Test(string content)
+    {
+        // Arrange.
+        string payload = AesCryptography.AesGcmEncrypt(Password, content, 1).Value;
+
+        // Act.
+        ErrorOr<string> result = AesCryptography.AesGcmDecrypt(Password, payload);
+
+        // Assert: the content comes back exactly, not as "".
+        result.IsError.ShouldBeFalse();
+        result.Value.ShouldBe(content);
+    }
+
+    /// <summary>
+    /// The salt and the nonce are random for every call, so the same content gives different
+    /// payloads.
+    /// </summary>
+    [Fact]
+    public void AesGcmEncrypt_ProducesDifferentPayloadEachCall_Test()
+    {
+        // Act.
+        string first = AesCryptography.AesGcmEncrypt(Password, PlainText, 1).Value;
+        string second = AesCryptography.AesGcmEncrypt(Password, PlainText, 1).Value;
+
+        // Assert: different salt, nonce and ciphertext.
+        string[] a = first.Split(':');
+        string[] b = second.Split(':');
+        a[2].ShouldNotBe(b[2]);
+        a[3].ShouldNotBe(b[3]);
+        a[4].ShouldNotBe(b[4]);
+    }
+
+    /// <summary>
+    /// The iteration count passed by the caller is recorded in the payload.
+    /// </summary>
+    [Fact]
+    public void AesGcmEncrypt_RecordsIterations_Test()
+    {
+        // Act.
+        ErrorOr<string> result = AesCryptography.AesGcmEncrypt(Password, PlainText, 1);
+
+        // Assert.
+        result.IsError.ShouldBeFalse();
+        result.Value.ShouldStartWith("v2:1:");
+    }
+
+    /// <summary>
+    /// A null password or content must be a <see cref="ErrorType.Validation"/> error that names the
+    /// parameter.
+    /// </summary>
+    [Fact]
+    public void AesGcmEncrypt_NullArgumentsReturnValidationError_Test()
+    {
+        // Act.
+        ErrorOr<string> nullPassword = AesCryptography.AesGcmEncrypt(null!, PlainText);
+        ErrorOr<string> nullContent = AesCryptography.AesGcmEncrypt(Password, null!);
+
+        // Assert.
+        nullPassword.FirstError.Type.ShouldBe(ErrorType.Validation);
+        nullPassword.FirstError.Description.ShouldBe("password");
+        nullContent.FirstError.Type.ShouldBe(ErrorType.Validation);
+        nullContent.FirstError.Description.ShouldBe("content");
+    }
+
+    /// <summary>
+    /// An iteration count below 1 or above 6,000,000 must be a <see cref="ErrorType.Validation"/>
+    /// error: the decrypt would reject such a payload.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(6_000_001)]
+    public void AesGcmEncrypt_IterationsOutOfRangeReturnValidationError_Test(int iterations)
+    {
+        // Act.
+        ErrorOr<string> result = AesCryptography.AesGcmEncrypt(Password, PlainText, iterations);
+
+        // Assert.
+        result.IsError.ShouldBeTrue();
+        result.FirstError.Type.ShouldBe(ErrorType.Validation);
+        result.FirstError.Description.ShouldBe("iterations");
+    }
+
+    /// <summary>
+    /// A payload stored with the authenticated format must keep decrypting to its plaintext.
+    /// </summary>
+    [Fact]
+    public void AesGcmDecrypt_KnownPayload_Test()
+    {
+        // Act.
+        ErrorOr<string> result = AesCryptography.AesGcmDecrypt(Password, KnownGcmPayload);
+
+        // Assert.
+        result.IsError.ShouldBeFalse();
+        result.Value.ShouldBe(PlainText);
+    }
+
+    /// <summary>
+    /// A null password or payload must be a <see cref="ErrorType.Validation"/> error that names the
+    /// parameter.
+    /// </summary>
+    [Fact]
+    public void AesGcmDecrypt_NullArgumentsReturnValidationError_Test()
+    {
+        // Act.
+        ErrorOr<string> nullPassword = AesCryptography.AesGcmDecrypt(null!, KnownGcmPayload);
+        ErrorOr<string> nullContent = AesCryptography.AesGcmDecrypt(Password, null!);
+
+        // Assert.
+        nullPassword.FirstError.Type.ShouldBe(ErrorType.Validation);
+        nullPassword.FirstError.Description.ShouldBe("password");
+        nullContent.FirstError.Type.ShouldBe(ErrorType.Validation);
+        nullContent.FirstError.Description.ShouldBe("encryptedContent");
+    }
+
+    /// <summary>
+    /// A change to any authenticated part of a payload (the iteration count, the salt, the nonce, the
+    /// ciphertext or the tag) must fail authentication: a <see cref="ErrorType.Failure"/> error, never
+    /// text.
+    /// </summary>
+    [Theory]
+    [InlineData("iterations")]
+    [InlineData("salt")]
+    [InlineData("nonce")]
+    [InlineData("ciphertext")]
+    [InlineData("tag")]
+    public void AesGcmDecrypt_ChangedPayloadFailsAuthentication_Test(string part)
+    {
+        // Arrange: a valid payload with one part changed.
+        string payload = AesCryptography.AesGcmEncrypt(Password, PlainText, 1).Value;
+        string changed = ChangeGcmPayload(payload, part);
+
+        // Act.
+        ErrorOr<string> result = AesCryptography.AesGcmDecrypt(Password, changed);
+
+        // Assert.
+        result.IsError.ShouldBeTrue();
+        result.FirstError.Type.ShouldBe(ErrorType.Failure);
+        result.FirstError.Code.ShouldBe("AesGcm.AuthenticationFailed");
+    }
+
+    /// <summary>
+    /// A changed version marker is no longer the authenticated format: a
+    /// <see cref="ErrorType.Validation"/> error (<c>AesGcm.InvalidPayload</c>), never text.
+    /// </summary>
+    [Fact]
+    public void AesGcmDecrypt_ChangedVersionIsInvalidPayload_Test()
+    {
+        // Arrange: "v2:..." becomes "v3:...".
+        string payload = AesCryptography.AesGcmEncrypt(Password, PlainText, 1).Value;
+        string changed = "v3" + payload.Substring(2);
+
+        // Act.
+        ErrorOr<string> result = AesCryptography.AesGcmDecrypt(Password, changed);
+
+        // Assert.
+        result.IsError.ShouldBeTrue();
+        result.FirstError.Type.ShouldBe(ErrorType.Validation);
+        result.FirstError.Code.ShouldBe("AesGcm.InvalidPayload");
+    }
+
+    /// <summary>
+    /// A wrong password must never give text: 20,000 wrong passwords (with one iteration, so the run
+    /// stays short) must each fail authentication. The CBC format of <c>AesEncrypt</c> returned other
+    /// text for about 0.4 % of wrong passwords.
+    /// </summary>
+    [Fact]
+    public void AesGcmDecrypt_WrongPasswordNeverGivesText_Test()
+    {
+        // Arrange.
+        string payload = AesCryptography.AesGcmEncrypt(Password, PlainText, 1).Value;
+        int failures = 0;
+
+        // Act: count the authentication failures.
+        for (int i = 0; i < 20_000; i++)
+        {
+            ErrorOr<string> result = AesCryptography.AesGcmDecrypt($"wrong-{i}", payload);
+            if (result.IsError && result.FirstError.Code == "AesGcm.AuthenticationFailed") failures++;
+        }
+
+        // Assert: every try failed authentication.
+        failures.ShouldBe(20_000);
+    }
+
+    /// <summary>
+    /// Content that is not a valid payload must be a <see cref="ErrorType.Validation"/> error
+    /// (<c>AesGcm.InvalidPayload</c>). The iteration count is checked before PBKDF2 runs, so a payload
+    /// cannot ask for more than 6,000,000 iterations.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("v2:")]
+    [InlineData("v2:10000:" + KnownGcmSalt + ":" + KnownGcmNonce)]
+    [InlineData(KnownGcmPayload + ":extra")]
+    [InlineData(KnownPayloadWithDefaults)]
+    [InlineData("v2:abc:" + KnownGcmSalt + ":" + KnownGcmNonce + ":" + KnownGcmSealed)]
+    [InlineData("v2:-1:" + KnownGcmSalt + ":" + KnownGcmNonce + ":" + KnownGcmSealed)]
+    [InlineData("v2:0:" + KnownGcmSalt + ":" + KnownGcmNonce + ":" + KnownGcmSealed)]
+    [InlineData("v2:6000001:" + KnownGcmSalt + ":" + KnownGcmNonce + ":" + KnownGcmSealed)]
+    [InlineData("v2:2147483647:" + KnownGcmSalt + ":" + KnownGcmNonce + ":" + KnownGcmSealed)]
+    [InlineData("v2:10000:@@@@:" + KnownGcmNonce + ":" + KnownGcmSealed)]
+    [InlineData("v2:10000:AAAAAAAAAAAAAAAA:" + KnownGcmNonce + ":" + KnownGcmSealed)]
+    [InlineData("v2:10000:" + KnownGcmSalt + ":AAAAAAAAAAAAAAAAAAAAAA==:" + KnownGcmSealed)]
+    [InlineData("v2:10000:" + KnownGcmSalt + ":" + KnownGcmNonce + ":AAAAAAAAAAA=")]
+    public void AesGcmDecrypt_MalformedPayloadReturnsValidationError_Test(string payload)
+    {
+        // Act.
+        ErrorOr<string> result = AesCryptography.AesGcmDecrypt(Password, payload);
+
+        // Assert.
+        result.IsError.ShouldBeTrue();
+        result.FirstError.Type.ShouldBe(ErrorType.Validation);
+        result.FirstError.Code.ShouldBe("AesGcm.InvalidPayload");
+    }
+
+    /// <summary>
+    /// <see cref="AesCryptography.AesDecrypt"/> reads the authenticated format too, so a caller can
+    /// switch to <see cref="AesCryptography.AesGcmEncrypt"/> and keep decrypting old and new data with
+    /// one call.
+    /// </summary>
+    [Fact]
+    public void AesDecrypt_ReadsGcmPayload_Test()
+    {
+        // Act.
+        ErrorOr<string> result = AesCryptography.AesDecrypt(Password, KnownGcmPayload);
+
+        // Assert.
+        result.IsError.ShouldBeFalse();
+        result.Value.ShouldBe(PlainText);
+    }
+
+    /// <summary>
+    /// <see cref="AesCryptography.AesDecrypt"/> keeps its contract for the authenticated format: a
+    /// failure hands the input back, as a success.
+    /// </summary>
+    [Fact]
+    public void AesDecrypt_GcmPayloadWithWrongPasswordReturnsInput_Test()
+    {
+        // Act.
+        ErrorOr<string> result = AesCryptography.AesDecrypt("the-wrong-password", KnownGcmPayload);
+
+        // Assert.
+        result.IsError.ShouldBeFalse();
+        result.Value.ShouldBe(KnownGcmPayload);
+    }
+
+    /// <summary>
+    /// The formats are told apart by the prefix "v2:", colon included. The Base64 IV of an
+    /// <c>AesEncrypt</c> payload starts with "v2" about once in 4,096 payloads; such a payload must
+    /// still decrypt as the CBC format.
+    /// </summary>
+    [Fact]
+    public void AesDecrypt_CbcPayloadWhoseIvStartsWithV2_Test()
+    {
+        // Arrange: a CBC payload built as AesEncrypt builds it, with an IV whose Base64 text starts
+        // with "v2".
+        const string ivText = "v2AAAAAAAAAAAAAAAAAAAA==";
+        byte[] iv = Convert.FromBase64String(ivText);
+        using Aes aes = Aes.Create();
+        aes.Key = AesCryptography.MakeAESKey(Password, ivText).Value;
+        string payload = $"{ivText}:{Convert.ToBase64String(aes.EncryptCbc(Encoding.UTF8.GetBytes(PlainText), iv))}";
+
+        // Act.
+        ErrorOr<string> result = AesCryptography.AesDecrypt(Password, payload);
+
+        // Assert.
+        result.IsError.ShouldBeFalse();
+        result.Value.ShouldBe(PlainText);
+    }
+
+    /// <summary>
+    /// Changes one part of a payload of the authenticated format: the iteration count by one, or one
+    /// bit of the salt, the nonce, the first ciphertext byte or the last tag byte.
+    /// </summary>
+    /// <param name="payload">A valid payload.</param>
+    /// <param name="part">The part to change.</param>
+    /// <returns>The changed payload.</returns>
+    private static string ChangeGcmPayload(string payload, string part)
+    {
+        string[] parts = payload.Split(':');
+
+        switch (part)
+        {
+            case "iterations":
+                int iterations = int.Parse(parts[1], CultureInfo.InvariantCulture);
+                parts[1] = (iterations + 1).ToString(CultureInfo.InvariantCulture);
+                break;
+            case "salt":
+                parts[2] = FlipBit(parts[2], 0);
+                break;
+            case "nonce":
+                parts[3] = FlipBit(parts[3], 0);
+                break;
+            case "ciphertext":
+                parts[4] = FlipBit(parts[4], 0);
+                break;
+            case "tag":
+                parts[4] = FlipBit(parts[4], ^1);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(part), part, "Unknown payload part.");
+        }
+
+        return string.Join(':', parts);
+    }
+
+    /// <summary>
+    /// Flips the lowest bit of one byte of Base64 data.
+    /// </summary>
+    /// <param name="base64">The Base64 text.</param>
+    /// <param name="byteIndex">The byte to change.</param>
+    /// <returns>The changed data as Base64 text.</returns>
+    private static string FlipBit(string base64, Index byteIndex)
+    {
+        byte[] bytes = Convert.FromBase64String(base64);
+        bytes[byteIndex] ^= 0x01;
+        return Convert.ToBase64String(bytes);
     }
 
     #endregion
