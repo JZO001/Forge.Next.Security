@@ -32,10 +32,13 @@ namespace Forge.Next.Security.Tests;
 /// test project. The PFX round-trip helpers load the key with
 /// <c>X509KeyStorageFlags.MachineKeySet</c>, which on Windows requires write access to the machine
 /// key container; the tests assume they are executed in such an environment (a standard developer
-/// workstation).
+/// workstation). Those loads also persist the private key there (a file in the machine key store on
+/// Windows), and nothing in the library removes it; the class therefore deletes the keys of the
+/// certificates it loaded from PFX data after each test (<see cref="Dispose"/>), so a run leaves no
+/// key file behind.
 /// </para>
 /// </summary>
-public class CertificateFactoryTests
+public class CertificateFactoryTests : IDisposable
 {
     // ---------------------------------------------------------------------------------------------
     // Shared test data. Using constants keeps the individual tests focused on the behaviour under
@@ -58,6 +61,25 @@ public class CertificateFactoryTests
     /// window comfortably absorbs that rounding without weakening the assertion.
     /// </summary>
     private static readonly TimeSpan ValidityTolerance = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// The certificates the current test loaded from PFX data. xUnit creates one instance of the class
+    /// per test, so the list holds one test's loads, and <see cref="Dispose"/> deletes their persisted
+    /// private keys after it.
+    /// </summary>
+    private readonly List<X509Certificate2> _pfxLoadedCertificates = new();
+
+    /// <summary>
+    /// Runs after every test and deletes the private keys that the test's PFX loads persisted in the
+    /// machine key store.
+    /// </summary>
+    public void Dispose()
+    {
+        foreach (X509Certificate2 certificate in _pfxLoadedCertificates)
+        {
+            DeletePersistedKey(certificate);
+        }
+    }
 
     #region Constants
 
@@ -466,9 +488,9 @@ public class CertificateFactoryTests
         const string customDns = "secure.example";
 
         // Act: the overload performs an export+import round-trip internally.
-        ErrorOr<X509Certificate2> result = CertificateFactory.CreateSelfSigned(
+        ErrorOr<X509Certificate2> result = DeleteKeyAfterTest(CertificateFactory.CreateSelfSigned(
             Subject, FriendlyName, new[] { customDns },
-            DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1), Password);
+            DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1), Password));
 
         result.IsError.ShouldBeFalse();
         X509Certificate2 certificate = result.Value;
@@ -505,7 +527,7 @@ public class CertificateFactoryTests
         result.Value.Length.ShouldBeGreaterThan(0);
 
         // Assert: the blob round-trips back to an equivalent certificate (same thumbprint, with key).
-        ErrorOr<X509Certificate2> reimported = CertificateFactory.GetFromRawData(result.Value, Password);
+        ErrorOr<X509Certificate2> reimported = DeleteKeyAfterTest(CertificateFactory.GetFromRawData(result.Value, Password));
         reimported.IsError.ShouldBeFalse();
         reimported.Value.Thumbprint.ShouldBe(certificate.Thumbprint);
         reimported.Value.HasPrivateKey.ShouldBeTrue();
@@ -532,8 +554,13 @@ public class CertificateFactoryTests
         result.IsError.ShouldBeFalse();
         result.Value.Length.ShouldBeGreaterThan(0);
 
-        // Re-load the DER bytes as a public-only certificate.
+        // Re-load the DER bytes as a public-only certificate. net8.0 has no X509CertificateLoader;
+        // from net9.0 the loading constructors are obsolete (SYSLIB0057), as in the library.
+#if NET8_0
+        X509Certificate2 reimported = new X509Certificate2(result.Value);
+#else
         X509Certificate2 reimported = X509CertificateLoader.LoadCertificate(result.Value);
+#endif
 
         // Assert: identity is preserved but the private key is intentionally absent.
         reimported.Thumbprint.ShouldBe(certificate.Thumbprint);
@@ -587,7 +614,7 @@ public class CertificateFactoryTests
         byte[] pfx = CertificateFactory.ExportToPfxRawData(original, Password).Value;
 
         // Act.
-        ErrorOr<X509Certificate2> result = CertificateFactory.GetFromRawData(pfx, Password);
+        ErrorOr<X509Certificate2> result = DeleteKeyAfterTest(CertificateFactory.GetFromRawData(pfx, Password));
 
         // Assert: success, identity preserved and the private key was imported.
         result.IsError.ShouldBeFalse();
@@ -615,6 +642,35 @@ public class CertificateFactoryTests
         result.FirstError.Type.ShouldBe(ErrorType.Unexpected);
     }
 
+    /// <summary>
+    /// DER certificate data (a .cer export, without a private key) is not PFX data, and the targets
+    /// differ on it. On <c>net8.0</c> the library loads with the <see cref="X509Certificate2"/>
+    /// constructor, which also reads DER and returns the public certificate; from <c>net9.0</c> it
+    /// loads with <see cref="X509CertificateLoader"/>, which reads PKCS#12 only, so the call returns
+    /// an <see cref="ErrorType.Unexpected"/> error. The test pins each target's own result.
+    /// </summary>
+    [Fact]
+    public void GetFromRawData_DerData_Test()
+    {
+        // Arrange: the DER encoding of an ephemeral certificate.
+        X509Certificate2 original = CreateCertificate().Value;
+        byte[] der = CertificateFactory.ExportToCerFile(original).Value;
+
+        // Act: hand the DER bytes to the PFX loader.
+        ErrorOr<X509Certificate2> result = CertificateFactory.GetFromRawData(der, Password);
+
+#if NET8_0
+        // Assert (net8.0): the public certificate, without a private key.
+        result.IsError.ShouldBeFalse();
+        result.Value.Thumbprint.ShouldBe(original.Thumbprint);
+        result.Value.HasPrivateKey.ShouldBeFalse();
+#else
+        // Assert (net9.0 and later): the PKCS#12 loader rejects DER data.
+        result.IsError.ShouldBeTrue();
+        result.FirstError.Type.ShouldBe(ErrorType.Unexpected);
+#endif
+    }
+
     #endregion
 
     #region GetFromFile
@@ -635,7 +691,7 @@ public class CertificateFactoryTests
         try
         {
             // Act.
-            ErrorOr<X509Certificate2> result = CertificateFactory.GetFromFile(path, Password);
+            ErrorOr<X509Certificate2> result = DeleteKeyAfterTest(CertificateFactory.GetFromFile(path, Password));
 
             // Assert: success, identity preserved and the private key was imported.
             result.IsError.ShouldBeFalse();
@@ -696,9 +752,74 @@ public class CertificateFactoryTests
         result.FirstError.Type.ShouldBe(ErrorType.Unexpected);
     }
 
+    /// <summary>
+    /// A .cer file (DER, without a private key) is not a PFX file, and the targets differ on it as
+    /// in <see cref="GetFromRawData_DerData_Test"/>: <c>net8.0</c> loads the public certificate,
+    /// <c>net9.0</c> and later return an <see cref="ErrorType.Unexpected"/> error.
+    /// </summary>
+    [Fact]
+    public void GetFromFile_CerFile_Test()
+    {
+        // Arrange: write the DER encoding of an ephemeral certificate to a unique temporary file.
+        X509Certificate2 original = CreateCertificate().Value;
+        byte[] der = CertificateFactory.ExportToCerFile(original).Value;
+        string path = Path.Combine(Path.GetTempPath(), $"forge-cert-{Guid.NewGuid():N}.cer");
+        File.WriteAllBytes(path, der);
+
+        try
+        {
+            // Act: hand the .cer file to the PFX loader.
+            ErrorOr<X509Certificate2> result = CertificateFactory.GetFromFile(path, Password);
+
+#if NET8_0
+            // Assert (net8.0): the public certificate, without a private key.
+            result.IsError.ShouldBeFalse();
+            result.Value.Thumbprint.ShouldBe(original.Thumbprint);
+            result.Value.HasPrivateKey.ShouldBeFalse();
+#else
+            // Assert (net9.0 and later): the PKCS#12 loader rejects a DER file.
+            result.IsError.ShouldBeTrue();
+            result.FirstError.Type.ShouldBe(ErrorType.Unexpected);
+#endif
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     #endregion
 
     #region Private helpers
+
+    /// <summary>
+    /// Registers the certificate of a successful PFX load, so <see cref="Dispose"/> deletes its
+    /// persisted private key after the test, and hands the result back unchanged.
+    /// </summary>
+    /// <param name="result">The result of a PFX load.</param>
+    /// <returns><paramref name="result"/> itself.</returns>
+    private ErrorOr<X509Certificate2> DeleteKeyAfterTest(ErrorOr<X509Certificate2> result)
+    {
+        if (!result.IsError) _pfxLoadedCertificates.Add(result.Value);
+        return result;
+    }
+
+    /// <summary>
+    /// Deletes the private key that a load with <c>PersistKeySet | MachineKeySet</c> persisted. On
+    /// Windows the key lands in the CNG machine key store (<c>C:\ProgramData\Microsoft\Crypto\Keys</c>);
+    /// deleting it through <see cref="CngKey.Delete"/> removes the file. Elsewhere nothing is persisted.
+    /// </summary>
+    /// <param name="certificate">A certificate loaded from PFX data.</param>
+    private static void DeletePersistedKey(X509Certificate2 certificate)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        using RSA? rsa = certificate.GetRSAPrivateKey();
+        if (rsa is RSACng cng)
+        {
+            cng.Key.Delete();
+        }
+    }
 
     /// <summary>
     /// Creates a standard ephemeral self-signed certificate (subject <see cref="Subject"/>, friendly

@@ -113,13 +113,15 @@ encryption (PBKDF2 key derivation, AES-CBC). Every public method returns an `Err
   - the work of each public method runs inside `Protect`, directly or through another public method, chained with
     `ErrorOr`'s `Then`, `ThenDo` and `Else`;
   - XML documentation on every public member (`GenerateDocumentationFile`); the build reports a missing one (CS1591).
-- **Tests** (`tests/Forge.Next.Security.Tests`, `net10.0`):
+- **Tests** (`tests/Forge.Next.Security.Tests`, the same targets as the library: `net8.0`, `net9.0`, `net10.0`,
+  `net11.0`; a test that differs per target asserts each target's result with `#if NET8_0`):
   - xUnit 2, Shouldly, NSubstitute (referenced, not used: the classes are static and have no collaborators);
   - one test class per source file (`<File>Tests`; `CertificateStoreTests` tests `CertificateAccess`); test methods
     named after the tested member with a `Test` suffix (`AesDecryptTest`), other cases as `<Member>_<Case>_Test`
     (`AesDecrypt_WrongPasswordDoesNotRevealPlaintext_Test`); richly commented (see `prompts/init_tests.txt`);
   - the store tests use the real `CurrentUser\My` store and remove what they add; the PFX tests import into the
-    machine key store and leave the keys there (see `AI/OPEN.md`).
+    machine key store, and `CertificateFactoryTests.Dispose` deletes the persisted keys after each test: wrap every
+    new successful PFX load in `DeleteKeyAfterTest`, or each run leaves a key file per load and target.
 - **Before handing over a change:**
   - a 0-warning build of the solution, all targets;
   - all tests;

@@ -414,4 +414,84 @@ public class AesCryptographyTests
     }
 
     #endregion
+
+    #region Known-answer payloads
+
+    // ---------------------------------------------------------------------------------------------
+    // Payloads made once, on 2026-11-15, by AesEncrypt of the 3.2.0 code, and decrypted
+    // independently with OpenSSL (PBKDF2 over the UTF-8 password with the IV's Base64 text as the
+    // salt, then AES-256-CBC). They pin the stored format: "<Base64 IV>:<Base64 ciphertext>", the
+    // IV's Base64 text as the PBKDF2 salt, and the defaults (HMAC-SHA-256, 100,000 iterations,
+    // 32 bytes). Data encrypted by an earlier version must stay decryptable, and AesDecrypt would hide
+    // a break by returning its input unchanged; these tests make such a change fail loudly instead.
+    // Never regenerate these payloads to make a test pass: a failure here means stored data broke.
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// <see cref="PlainText"/> encrypted with <see cref="Password"/> and the default parameters.
+    /// </summary>
+    private const string KnownPayloadWithDefaults =
+        "rJXou3Bh+t/JF2GnOutygQ==:u+PkyH2WEdKeAly1n9wVR+WAhabpgPJouEMnxS2vBfrfNq8h7hYIxCDrLcWYqeKt";
+
+    /// <summary>
+    /// <see cref="PlainText"/> encrypted with <see cref="Password"/>, SHA-512, a 32-byte key and
+    /// 5,000 iterations.
+    /// </summary>
+    private const string KnownPayloadWithSha512And5000Iterations =
+        "qRc+ZSBB2xAp1U1QTRYkPA==:jwpV83WNkQMQpSw+HV+yuBH47QKbWcgDdAmcV7rxs5T28UeNigJdZQHPbhWwitK+";
+
+    /// <summary>
+    /// A payload stored by an earlier version with the default parameters must still decrypt, with
+    /// the default parameters, to its plaintext.
+    /// </summary>
+    [Fact]
+    public void AesDecrypt_KnownPayloadWithDefaults_Test()
+    {
+        // Act: decrypt the stored payload with today's defaults.
+        ErrorOr<string> result = AesCryptography.AesDecrypt(Password, KnownPayloadWithDefaults);
+
+        // Assert: the original plaintext, not the input handed back by the fallback.
+        result.IsError.ShouldBeFalse();
+        result.Value.ShouldBe(PlainText);
+    }
+
+    /// <summary>
+    /// A payload stored with explicit parameters must still decrypt when the same parameters are
+    /// passed again.
+    /// </summary>
+    [Fact]
+    public void AesDecrypt_KnownPayloadWithCustomParameters_Test()
+    {
+        // Act: decrypt with the parameters the payload was made with.
+        ErrorOr<string> result = AesCryptography.AesDecrypt(
+            Password,
+            KnownPayloadWithSha512And5000Iterations,
+            HashAlgorithmName.SHA512,
+            32,
+            5000);
+
+        // Assert: the original plaintext.
+        result.IsError.ShouldBeFalse();
+        result.Value.ShouldBe(PlainText);
+    }
+
+    /// <summary>
+    /// The payload does not record its key-derivation parameters: decrypting a payload made with
+    /// SHA-512 and 5,000 iterations with the defaults derives another key and must not give the
+    /// plaintext back. For this fixed payload the padding check fails, so the input comes back
+    /// unchanged (observed when the payload was made).
+    /// </summary>
+    [Fact]
+    public void AesDecrypt_KnownPayloadNeedsItsParameters_Test()
+    {
+        // Act: decrypt with the defaults instead of the payload's parameters.
+        ErrorOr<string> result = AesCryptography.AesDecrypt(Password, KnownPayloadWithSha512And5000Iterations);
+
+        // Assert: no plaintext; the lenient fallback hands the input back.
+        result.IsError.ShouldBeFalse();
+        result.Value.ShouldNotBe(PlainText);
+        result.Value.ShouldBe(KnownPayloadWithSha512And5000Iterations);
+    }
+
+    #endregion
 }

@@ -6,14 +6,13 @@
 		<Nullable>enable</Nullable>
 		<LangVersion>12.0</LangVersion>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
-		<DocumentationFile>Forge.Next.Security.xml</DocumentationFile>
 	</PropertyGroup>
 
 	<PropertyGroup>
 		<Title>Forge.Next.Security: Forge Patterns and Practices.</Title>
 		<Product>Forge.Next.Security: Forge Patterns and Practices.</Product>
 		<PackageId>Forge.Next.Security</PackageId>
-		<AssemblyVersion>3.2.0.0</AssemblyVersion>
+		<AssemblyVersion>3.2.1.0</AssemblyVersion>
 		<Version>$(AssemblyVersion)</Version>
 		<FileVersion>$(AssemblyVersion)</FileVersion>
 		<Authors>Zoltan Juhasz</Authors>
@@ -23,7 +22,7 @@
 		<PackageOutputPath>../artifacts/</PackageOutputPath>
 		<PackageProjectUrl>https://github.com/JZO001/Forge.Next.Security</PackageProjectUrl>
 		<RepositoryType>git</RepositoryType>
-		<licenses>https://github.com/JZO001/Forge.Next.Security#Apache-2.0-1-ov-file</licenses>
+		<PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
 		<RepositoryUrl>https://github.com/JZO001/Forge.Next.Security</RepositoryUrl>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 		<ProjectGuid>{D5C81D1D-B974-4E88-9AA9-004FC4DC7CAB}</ProjectGuid>
@@ -32,7 +31,6 @@
 	<ItemGroup>
 		<None Include="../logo.png" Pack="true" Visible="false" PackagePath="" />
 		<None Include="../README.md" Pack="true" PackagePath="" />
-		<None Remove="Forge.Next.Security.xml" />
 	</ItemGroup>
 
 	<PropertyGroup Condition="'$(Configuration)' == 'Release'">

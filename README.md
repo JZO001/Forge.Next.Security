@@ -41,6 +41,7 @@ It is part of the **Forge Patterns and Practices** family.
 - [How Subject Alternative Names are built](#how-subject-alternative-names-are-built)
 - [End-to-end example](#end-to-end-example)
 - [Notes, gotchas & platform behaviour](#notes-gotchas--platform-behaviour)
+- [Security notes](#security-notes)
 - [Testing](#testing)
 - [License](#license)
 
@@ -241,7 +242,7 @@ public static ErrorOr<X509Certificate2> CreateSelfSigned(
     int keySize = 2048)
 ```
 
-Same as the overload above, but after creation the certificate is **exported to a password-protected PFX and re-imported** with `X509KeyStorageFlags.Exportable | PersistKeySet | MachineKeySet`. Use this overload when you need the private key persisted in the **machine key store** (for example, a Windows service that must access the key across processes/sessions).
+Same as the overload above, but after creation the certificate is **exported to a password-protected PFX and re-imported** with `X509KeyStorageFlags.Exportable | PersistKeySet | MachineKeySet`. Use this overload when you need the private key persisted in the **machine key store** (for example, a Windows service that must access the key across processes/sessions). The key **stays there** after the certificate is disposed: every call adds one, and nothing in this package removes it (see [Notes](#notes-gotchas--platform-behaviour) for removing one).
 
 **Parameters** — identical to the overload above, plus a `password` (the password protecting the intermediate PFX round-trip), with `keySize` moving to the final position.
 
@@ -299,7 +300,8 @@ if (!cer.IsError)
 {
     File.WriteAllBytes("mycert.cer", cer.Value);
 
-    // Re-loading the .cer yields a certificate WITHOUT a private key:
+    // Re-loading the .cer yields a certificate WITHOUT a private key
+    // (net9.0 and later; on net8.0 use new X509Certificate2(cer.Value)):
     var publicOnly = X509CertificateLoader.LoadCertificate(cer.Value);
     Console.WriteLine(publicOnly.HasPrivateKey); // False
 }
@@ -314,6 +316,8 @@ public static ErrorOr<X509Certificate2> GetForLocalhost(string subject, string f
 ```
 
 Convenience method that creates a self-signed certificate already valid (`NotBefore = yesterday`) and effectively **non-expiring** (`NotAfter = DateTime.MaxValue`, i.e. the year 9999), with the default `localhost` / loopback SAN entries. Ideal for local HTTPS during development.
+
+> ⚠️ **Time zones west of UTC:** `DateTime.MaxValue` is taken as local time. Where the UTC offset is negative, its UTC equivalent passes the year 9999 and the call returns an `ErrorType.Unexpected` error. There, call [`CreateSelfSigned`](#createselfsigned-without-password) with `endTime: DateTime.SpecifyKind(DateTime.MaxValue, DateTimeKind.Utc)`, which ends the certificate at 9999-12-31 23:59:59Z in every time zone. East of UTC, `GetForLocalhost` ends the certificate earlier by the offset (9999-12-31 22:59:59Z at UTC+01:00).
 
 **Parameters**
 
@@ -342,7 +346,7 @@ public static ErrorOr<X509Certificate2> GetFromRawData(byte[] certificateData, s
 ```
 
 Loads a certificate (with private key) from PFX/PKCS#12 raw bytes using
-`Exportable | PersistKeySet | MachineKeySet`. The inverse of [`ExportToPfxRawData`](#exporttopfxrawdata).
+`Exportable | PersistKeySet | MachineKeySet`, so the private key stays in the machine key store (see [Notes](#notes-gotchas--platform-behaviour)). The inverse of [`ExportToPfxRawData`](#exporttopfxrawdata).
 
 **Example**
 
@@ -366,7 +370,7 @@ else
 public static ErrorOr<X509Certificate2> GetFromFile(string certificateFile, string? password)
 ```
 
-Loads a certificate (with private key) directly from a PFX file on disk. The `password` may be `null` for a password-less PFX. A missing file or wrong password is returned as an `ErrorType.Unexpected` error rather than thrown.
+Loads a certificate (with private key) directly from a PFX file on disk, with the same flags as [`GetFromRawData`](#getfromrawdata), so the private key stays in the machine key store. The `password` may be `null` for a password-less PFX. A missing file or wrong password is returned as an `ErrorType.Unexpected` error rather than thrown.
 
 **Parameters**
 
@@ -514,7 +518,7 @@ foreach (X509Certificate2 cert in result.Value)
 public static ErrorOr<IEnumerable<string>> GetAlternateNames(X509Certificate2 certificate)
 ```
 
-Reads the certificate's SAN extension and returns its IP-address entries (rendered via `IPAddress.ToString()`) followed by its DNS-name entries. A certificate with **no** SAN extension yields a successful, empty sequence.
+Reads the certificate's SAN extension and returns its IP-address entries (rendered via `IPAddress.ToString()`) followed by its DNS-name entries, each group in the extension's order; in a certificate of this package your custom entries come before the defaults. A certificate with **no** SAN extension yields a successful, empty sequence.
 
 **Example**
 
@@ -524,15 +528,15 @@ ErrorOr<IEnumerable<string>> result = CertificateAccess.GetAlternateNames(certif
 foreach (string name in result.Value)
     Console.WriteLine(name);
 
-// Typical output for a freshly created certificate:
+// Output for a certificate created with the custom entry "myapp.local":
 // 127.0.0.1
 // ::1
 // 0.0.0.0
 // ::
 // 0.0.0.0
+// myapp.local
 // localhost
 // MACHINENAME
-// myapp.local
 ```
 
 ---
@@ -570,8 +574,12 @@ Derives AES keys with **PBKDF2** and performs **AES-CBC** encryption/decryption 
 | `MakeAESKey(string, string, HashAlgorithmName?, int, int)` | `ErrorOr<byte[]>` | Derive a key from a password + salt using PBKDF2. |
 | `AesEncrypt(string, string, HashAlgorithmName?, int, int)` | `ErrorOr<string>` | Encrypt a string; returns `"iv:ciphertext"`. |
 | `AesDecrypt(string, string, HashAlgorithmName?, int, int)` | `ErrorOr<string>` | Decrypt an `"iv:ciphertext"` string. |
+| `Iterations` (constant) | `int` | `100000`: the default PBKDF2 iteration count. |
+| `DefaultOutputLength` (constant) | `int` | `32`: the default key length in bytes (AES-256). |
 
-Defaults: `hashAlgorithmName = SHA-256`, `outputLength = 32` bytes (AES-256), `iterations = 100 000`.
+Defaults: `hashAlgorithmName = SHA-256`, `outputLength = DefaultOutputLength` (32 bytes, AES-256), `iterations = Iterations` (100 000). Both are `const`, and optional-parameter defaults are compiled into the calling assembly: a different value in a later package version reaches your code only when you recompile.
+
+The payload does not record these parameters: decrypt with the same `hashAlgorithmName`, `outputLength` and `iterations` you encrypted with.
 
 ---
 
@@ -661,7 +669,8 @@ Failure handling is deliberately lenient — the only error path is a `null` pas
 - A correct password + valid payload → the original plaintext.
 - `null`/empty/whitespace input → a successful **empty string**.
 - Malformed input (not two colon-separated parts) → returned **unchanged**.
-- A wrong password or undecodable payload → the original input is returned **unchanged** (the plaintext is never disclosed), thanks to the internal `.Else(...)` fallback.
+- An undecodable payload (bad Base64, wrong lengths) → the original input is returned **unchanged**, thanks to the internal `.Else(...)` fallback.
+- A wrong password → usually the original input **unchanged**: the derived key is wrong, the padding check fails, and the fallback returns the input. In about 0.4 % of the cases (measured: 300 in 80,000 tries) the wrong key still leaves valid padding, and **other text** comes back as a success. The plaintext is never disclosed, but a success does not prove that the password was right: the payload has no integrity check (see [Security notes](#security-notes)).
 
 **Example**
 
@@ -672,7 +681,7 @@ string payload = AesCryptography.AesEncrypt("p@ssword", "Hello, world!").Value;
 ErrorOr<string> ok = AesCryptography.AesDecrypt("p@ssword", payload);
 Console.WriteLine(ok.Value); // Hello, world!
 
-// Wrong password never reveals the plaintext (returns the input unchanged):
+// A wrong password never reveals the plaintext (it usually returns the input unchanged):
 ErrorOr<string> wrong = AesCryptography.AesDecrypt("not-the-password", payload);
 Console.WriteLine(wrong.Value == "Hello, world!"); // False
 ```
@@ -688,10 +697,10 @@ When you call either `CreateSelfSigned` overload (and therefore `GetForLocalhost
    - The **reserved names** `localhost`, `*`, and the current **machine name** are skipped (also added by default below).
    - Anything else is added as a **DNS name**.
 2. **A fixed set of default entries** is always appended:
-   - IP addresses: `127.0.0.1`, `::1`, `0.0.0.0`, `::`, and `0.0.0.0` (any).
+   - IP addresses: `127.0.0.1`, `::1`, `0.0.0.0`, `::`, and `0.0.0.0` again (`IPAddress.Any`), so `0.0.0.0` appears **twice**.
    - DNS names: `localhost` and the current machine name.
 
-The net effect: every generated certificate is automatically valid for loopback, "any" addresses, `localhost` and the local machine — and the skip rules ensure those defaults are never duplicated even if you pass them explicitly.
+The net effect: every generated certificate is automatically valid for loopback, "any" addresses, `localhost` and the local machine. The skip rules keep your copies of `127.0.0.1`, `::1`, `localhost`, `*` and the machine name out of the list; `0.0.0.0` and `::` are **not** skipped, so passing them adds them once more.
 
 ---
 
@@ -780,19 +789,40 @@ Console.WriteLine(back); // api-key-12345
 
 - **Exception-free:** expected failures are returned as `ErrorOr` errors, not thrown. Always check `IsError` (or use `Match`/`Switch`) before reading `.Value`.
 - **Friendly names are Windows-only.** `friendlyName` is applied only when running on Windows; on Linux/macOS the property is left empty (the certificate is otherwise identical).
-- **`MachineKeySet` may require elevation.** The password-based `CreateSelfSigned`, `GetFromRawData` and `GetFromFile` import keys with `MachineKeySet`. On Windows this writes to the machine key container and usually needs administrator rights; failures surface as `ErrorType.Unexpected`.
+- **`MachineKeySet` may require elevation, and the keys stay.** The password-based `CreateSelfSigned`, `GetFromRawData` and `GetFromFile` import keys with `Exportable | PersistKeySet | MachineKeySet`. On Windows this writes the private key to the machine key store (a file in `C:\ProgramData\Microsoft\Crypto\Keys`) and usually needs administrator rights; failures surface as `ErrorType.Unexpected`. The key file **stays there** after the certificate is disposed: every call adds one, and nothing in this package removes it. When you no longer need a key, and no certificate in a store still uses it, delete it yourself:
+
+  ```csharp
+  using RSA? rsa = certificate.GetRSAPrivateKey();
+  if (OperatingSystem.IsWindows() && rsa is RSACng cng)
+      cng.Key.Delete(); // removes the key file; the certificate can no longer use its private key
+  ```
+- **`net8.0` also loads DER files.** On `net8.0`, `GetFromRawData` and `GetFromFile` also accept a DER certificate (a `.cer`) and return it without a private key; from `net9.0` they accept PKCS#12/PFX only and return an `ErrorType.Unexpected` error for DER.
 - **Store write permissions.** `AddToStore`/`RemoveFromStore` against `StoreLocation.CurrentUser` work without elevation; `StoreLocation.LocalMachine` requires administrator rights.
 - **Validity precision.** X.509 stores `NotBefore`/`NotAfter` with whole-second precision, so sub-second parts of your `DateTime` arguments are truncated.
 - **`X509Certificate2.NotBefore` / `NotAfter` are returned in local time.** Convert with `.ToUniversalTime()` before comparing against UTC values.
 - **AES key size.** Through `AesEncrypt`/`AesDecrypt`, `outputLength` must be `16`, `24` or `32` bytes (the derived key becomes `Aes.Key`). `MakeAESKey` on its own accepts any length.
-- **`AesDecrypt` is lenient by design.** With a non-null password it never returns an error: a wrong password or malformed payload yields the input unchanged rather than an exception, so it never leaks the plaintext but also will not tell you decryption "failed" — compare the result against the input if you need to detect that.
+- **`AesDecrypt` is lenient by design.** With a non-null password it never returns an error: a malformed payload, and almost every wrong password, yields the input unchanged rather than an exception, so it never leaks the plaintext but also will not tell you decryption "failed". Comparing the result against the input catches most failures, not all: about 0.4 % of wrong passwords give other text (see [`AesDecrypt`](#aesdecrypt)).
 - **Disposal.** `X509Certificate2` is `IDisposable`. Dispose certificates you no longer need (e.g. with a `using` statement) to release key material promptly.
+
+---
+
+## Security notes
+
+- **The AES payload has no integrity protection.** `AesEncrypt` uses AES-CBC without a MAC, and `AesDecrypt` checks none:
+  - a changed payload can decrypt to changed text as a success (in a test, one flipped ciphertext bit changed one character of the next block);
+  - a wrong password gives other text as a success in about 0.4 % of the cases (see [`AesDecrypt`](#aesdecrypt));
+  - `AesDecrypt` answers differently to a bad padding (the input back) and a good one (other text), so do not let an untrusted party submit payloads to it and see the result: that makes a padding oracle possible.
+
+  Keep payloads where others cannot change them, or protect them with a MAC of your own.
+- **The PFX export uses legacy protection.** On Windows, `ExportToPfxRawData` writes PKCS#12 protected with TripleDES and SHA-1 and 2,000 iterations (checked with OpenSSL). A PFX with a weak password is cheap to attack offline: give a PFX you keep a long random password, and store it where others cannot read it.
+- **Errors carry stack traces.** Every `ErrorType.Unexpected` error carries the exception's `type`, `message` and `stackTrace` in its `Metadata`. Before you send an error out of your process (an HTTP response, a message to another service), remove the metadata, or at least the `stackTrace`.
+- **No secrets in this package's own errors.** The package logs nothing, and its `Validation` errors name the parameter, never its value.
 
 ---
 
 ## Testing
 
-The repository contains an xUnit test suite under `tests/Forge.Next.Security.Tests` (xUnit + Shouldly + NSubstitute) that exercises the full public surface of all three classes. Run it with:
+The repository contains an xUnit test suite under `tests/Forge.Next.Security.Tests` (xUnit + Shouldly + NSubstitute) that exercises the full public surface of all three classes on every target framework (`net8.0` to `net11.0`, so the four runtimes are needed). The PFX tests import keys with `MachineKeySet` (run them elevated on Windows) and delete the keys they create. Run it with:
 
 ```bash
 dotnet test

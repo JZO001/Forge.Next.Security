@@ -91,3 +91,105 @@ version that is, is asked before its Release build (`PLANS/RECOMMENDED_WAY_TO_FI
 list names `net11.0`. Checked: see `VERIFICATION.md`, 2026-11-15.
 
 Zoltán had the knowledge base, the new icon and this change committed together, before the first item of the fix plan.
+
+## 2026-11-15 – The decisions of the fix plan
+
+Zoltán asked for a fix plan from `PLANS/RECOMMENDED_WAY_TO_FIX.md`. Checking the plan against the code found
+refinements, now written into it: the new AES format is told apart by the prefix `v2:` (the IV of a current payload
+starts with `v2` about once in 4,096); the new decrypt bounds the payload's iteration count before it runs PBKDF2; the new
+methods take `int? iterations = null`, so the default is not compiled into the callers; the `GetForLocalhost` fix
+converts with `GetUtcOffset`, not with `ConvertTimeToUtc`; and A4 needs new `.cer` tests.
+
+Zoltán decided B1 to B6 as the plan recommends:
+- B1: new methods (`AesGcmEncrypt`, `AesGcmDecrypt`) write and read a `v2:` format: AES-256-GCM, PBKDF2-HMAC-SHA256,
+  the iterations, the salt and the nonce in the payload and authenticated. `AesDecrypt` reads both formats and keeps
+  returning its input on a failure; `AesEncrypt` keeps the current format and gets `[Obsolete]`. The reason: nothing
+  changes for the current callers, and an older package version still reads what `AesEncrypt` writes. The new decrypt
+  returns errors: `Validation` for a malformed payload, `Failure` for a failed authentication. The new encrypt encrypts
+  empty and whitespace-only content too.
+- B2: 600,000 iterations for the new format, after checking OWASP's current figure and measuring a decrypt.
+- B3: `ExportPkcs12` with PBES2, AES-256 and SHA-256 on `net10.0` and later; today's export on `net8.0` and `net9.0`,
+  documented; after checking that the importers read the AES form.
+- B4: an optional `X509KeyStorageFlags` parameter on the password overload of `CreateSelfSigned`, `GetFromRawData` and
+  `GetFromFile`, today's flags as its default, after checking why the key is persisted.
+- B5: `NotAfter` of `GetForLocalhost` becomes 9999-12-31 23:59:59Z everywhere; east of UTC it moves later by the offset.
+- B6: a README note (A5), no `includeStackTrace` parameter.
+
+None is coded yet. The order stays: Release A first. Which versions the releases get is asked before their Release
+builds.
+
+## 2026-11-15 – A1: one XML documentation file per target
+
+Zoltán asked for A1 of the fix plan. `<DocumentationFile>Forge.Next.Security.xml</DocumentationFile>` made the target
+builds, which run in parallel, write one file in the project folder, and each target copied whatever was there into its
+output and so into the package. The packages so far were whole only because every target documents the same members;
+the same setting put an empty, a truncated or another target's file into packages of Forge.Next.Formatters and
+Forge.Next.Shared. Changed:
+- the project file keeps `GenerateDocumentationFile` and drops the `DocumentationFile` line and the
+  `<None Remove="Forge.Next.Security.xml" />` item, so each target writes its own file under
+  `obj/<configuration>/<target>/`, as in Forge.Next.LocalWebShell;
+- `.gitignore` drops the `**/Forge.Next.Security.xml` entry and the blank line before it, which the "gitignore update"
+  commit (3aaaea0) had added, so it ends as in the first commit;
+- the ignored `Forge.Next.Security/Forge.Next.Security.xml` is deleted.
+
+No change to the package's API or behaviour. Checked: see `VERIFICATION.md`, 2026-11-15.
+
+From here Zoltán asked for the plan's items to be worked through one after the other, stopping only for a technical
+question.
+
+## 2026-11-15 – A2: the license in the package
+
+The project file set `<licenses>`, which neither MSBuild nor NuGet knows, so no package so far (3.0.0 to 3.2.0) carried a
+license. It now sets `<PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>`, as Forge.Next.Shared and
+Forge.Next.LocalWebShell do; the `LICENSE` file is the Apache License 2.0. The package's `.nuspec` gets
+`<license type="expression">Apache-2.0</license>` and NuGet's `licenseUrl`. Checked: see `VERIFICATION.md`, 2026-11-15.
+
+## 2026-11-15 – A3: known-answer tests for the AES payload
+
+Before B1 adds a second format, the current one is pinned: `AesCryptographyTests` holds two payloads made once with the
+3.2.0 code (the defaults; SHA-512 with 5,000 iterations), and three tests: each decrypts to its plaintext with its own
+parameters, and the SHA-512 payload with the defaults gives the input back, not the plaintext (the payload does not
+record its parameters). A change to the format, the salt rule or a default now fails a test instead of passing silently
+behind `AesDecrypt`'s fallback. The payloads must never be regenerated to make a test pass.
+
+## 2026-11-15 – A4: tests on every target
+
+The test project targets `net8.0`, `net9.0`, `net10.0` and `net11.0`, the library's targets, so the `#if NET8_0` branch
+of the PFX loading runs in the tests:
+- `ExportToCerFileTest` reloads the DER bytes with the constructor on `net8.0`, which has no `X509CertificateLoader`;
+- `GetFromRawData_DerData_Test` and `GetFromFile_CerFile_Test` pin the targets' difference: DER data loads as a public
+  certificate on `net8.0` and is an `Unexpected` error on the later targets (`net9.0` and `net11.0` measured for the
+  first time, both as `net10.0`).
+
+With four targets a run would have left 16 key files in the machine key store. The plan's interim fix, tried first and
+kept: `CertificateFactoryTests` registers each successful PFX load (`DeleteKeyAfterTest`), and its `Dispose` deletes the
+persisted CNG keys after each test (`RSACng.Key.Delete()` on Windows), so a run leaves none. No change to the library.
+
+## 2026-11-15 – A5: the README tells the truth; B6 closed
+
+The README now matches the code, with no change to the code:
+- `AesDecrypt`: a wrong password usually returns the input, but in about 0.4 % of the cases other text as a success; the
+  payload does not record its parameters; the lenient note says that comparing with the input catches most failures,
+  not all;
+- `AesCryptography`: the constants `Iterations` and `DefaultOutputLength`, and that they are compiled into the callers;
+- the SAN section: `0.0.0.0` twice in the defaults, and `0.0.0.0` and `::` not skipped;
+- `GetAlternateNames`: the custom entries come first among the DNS entries (the example output corrected);
+- the persisted keys stay in the machine key store, and how to delete one (`RSACng.Key.Delete()`, the same call the
+  tests use since A4);
+- `GetForLocalhost` fails west of UTC; the work-around (`CreateSelfSigned` with a UTC `DateTime.MaxValue`) was run on
+  Windows at +01:00 and on Linux at -05:00 and UTC before it went in;
+- `net8.0` also loads DER data in `GetFromRawData` and `GetFromFile`; the `ExportToCerFile` example notes that
+  `X509CertificateLoader` needs `net9.0`;
+- a new "Security notes" section: no integrity protection in the AES payload (and the padding oracle it allows), the
+  legacy PFX protection, the stack traces in the `Unexpected` errors' metadata, and that the package's own errors hold
+  no secrets;
+- the Testing section: every target, the elevation, the key clean-up.
+
+With the stack-trace note in place, B6 is closed as decided: no `includeStackTrace` parameter.
+
+## 2026-11-15 – 3.2.1: Release A
+
+Zoltán chose 3.2.1 for Release A (A1 to A5, B6, with the `net11.0` target and Forge.Next.Shared 3.3.2): a patch, as no
+API or behaviour changed, and Forge.Next.Shared added `net11.0` in a patch too (3.3.1). `AssemblyVersion` 3.2.0.0 →
+3.2.1.0. Release A is committed before Release B starts; the Release build into `artifacts/` and the publishing are
+Zoltán's.

@@ -20,14 +20,15 @@ All three classes are `public static`, in the `Forge.Next.Security` namespace. E
 | `net10.0` | `X509CertificateLoader.LoadPkcs12` / `LoadPkcs12FromFile` | `Forge.Next.Shared` 3.3.2 |
 | `net11.0` (since 2026-11-15) | `X509CertificateLoader.LoadPkcs12` / `LoadPkcs12FromFile` | `Forge.Next.Shared` 3.3.2 |
 
-**What differs on `net8.0`:** the constructor also loads a DER certificate. `GetFromFile` on a `.cer` file succeeds
-there (without a private key) and fails on `net10.0` ("ASN1 corrupted data"); checked with the probe on 2026-11-11 (see
-`VERIFICATION.md`). `GetFromRawData` has the same split. The tests run only the `net10.0` build.
+**What differs on `net8.0`:** the constructor also loads a DER certificate. `GetFromFile` on a `.cer` file and
+`GetFromRawData` on DER bytes succeed there (the public certificate, without a private key) and return an `Unexpected`
+error on `net9.0`, `net10.0` and `net11.0` ("ASN1 corrupted data" in the probe of 2026-11-11). Since 2026-11-15 the tests
+run on all four targets and pin each target's result (`GetFromRawData_DerData_Test`, `GetFromFile_CerFile_Test`).
 
-The project file writes the XML documentation to `Forge.Next.Security/Forge.Next.Security.xml` (a path relative to the
-project, so in the source folder; ignored by git since 2026-07-01). The package carries it as
-`lib/<target>/Forge.Next.Security.xml`. The four targets write that one file in parallel, which can put a
-wrong file into a package (see `OPEN.md`).
+Each target writes its own XML documentation file, `obj/<configuration>/<target>/Forge.Next.Security.xml`
+(`GenerateDocumentationFile` without a `DocumentationFile` path, since 2026-11-15), and the package carries it as
+`lib/<target>/Forge.Next.Security.xml`. Until then the project file named one file in the project folder for every
+target, which the parallel target builds wrote at the same time (see `HISTORY.md`, 2026-11-15).
 
 ## The AES payload
 

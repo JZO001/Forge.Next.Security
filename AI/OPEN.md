@@ -10,6 +10,10 @@ The order and the way to fix them: `PLANS/RECOMMENDED_WAY_TO_FIX.md` (2026-11-12
 The security findings come first, the most important first. None is fixed: each fix changes behaviour, a format or a
 default.
 
+Decided on 2026-11-15 (`HISTORY.md`): the AES format, the PBKDF2 default, the PFX export, the key storage flags,
+`GetForLocalhost` and the stack traces, each as `PLANS/RECOMMENDED_WAY_TO_FIX.md` recommends (B1 to B6). These items now
+wait for their fix, not for an answer.
+
 - **The AES payload has no integrity protection.** `AesEncrypt` is AES-CBC without a MAC, and `AesDecrypt` checks none.
   - Verified (probe, 2026-11-11): one flipped bit in the first ciphertext block of a three-block text decrypted with the
     right password to a success, the first block garbled and the same bit flipped in the second ("fox" → "gox").
@@ -18,7 +22,8 @@ default.
     came back has a CBC padding oracle on every block after the first (the IV is also the key's salt, so a changed IV
     changes the key). Each query costs one PBKDF2 run, which slows the attack, not stops it.
   - A wrong password is not always detected: in 300 of 80,000 tries (about 0.4 %) it left valid padding, and
-    `AesDecrypt` returned other text as a success, not the unchanged input the README promises.
+    `AesDecrypt` returned other text as a success. Since 2026-11-15 (A5) the README says so, and its "Security notes"
+    describe the missing integrity protection.
   - Options: AES-GCM (`AesGcm`, in the reference packs of all four targets), or HMAC-SHA-256 over the IV and the
     ciphertext with a key of its own (encrypt-then-MAC). Either needs a new payload format with a marker, and
     `AesDecrypt` must keep reading the current one. Recommended: AES-GCM behind a marker; a payload of the new format
@@ -32,60 +37,31 @@ default.
 - **Every PFX load persists an exportable private key in the machine key store, and nothing removes it.** The password
   overload of `CreateSelfSigned`, `GetFromRawData` and `GetFromFile` load with
   `Exportable | PersistKeySet | MachineKeySet`. On Windows each load leaves a key file: the test run of 2026-11-11 left
-  four in `C:\ProgramData\Microsoft\Crypto\Keys` (the folder held 7,329 files before it). The README names the flags and
-  says the loads write to the machine key container; it does not say that the keys stay there. Question: is the
+  four in `C:\ProgramData\Microsoft\Crypto\Keys` (the folder held 7,329 files before it). Since 2026-11-15 (A5) the
+  README says that the keys stay there, and how to delete one. Question: is the
   persistence intended for the two loaders as well? Options: an optional `X509KeyStorageFlags` parameter on the loaders,
-  defaulting to the current flags (no behaviour change); or ephemeral keys by default (a breaking change). Either way
-  the tests should stop leaving keys behind.
+  defaulting to the current flags (no behaviour change); or ephemeral keys by default (a breaking change). The tests
+  no longer leave keys behind: since 2026-11-15 `CertificateFactoryTests` deletes them after each test (A4).
 - **The PBKDF2 default:** 100,000 iterations of HMAC-SHA-256. For comparison, OWASP's Password Storage Cheat Sheet gives
   600,000 for PBKDF2-HMAC-SHA256 (not checked in this session). The count is not in the payload, and the default is
   compiled into the callers, so a new default needs the format marker of the first item. Question: keep 100,000?
-- **The errors carry stack traces.** Every `Unexpected` error has the exception's stack trace in its metadata
-  (`stackTrace`). Forge.Next.Shared 3.3.2, which the package references, offers `includeStackTrace`; the package does
-  not use it. A consumer that sends an error out of its process must strip the trace itself, and the README does not
-  say so. Options: a README note; or an optional `includeStackTrace` parameter (default `true`, the current behaviour).
 - **`GetForLocalhost` fails in a time zone west of UTC.** `NotAfter` is `DateTime.MaxValue`, which has no UTC kind, so
   `new DateTimeOffset(endTime)` applies the local offset; with a negative offset the UTC time passes year 9999 and the
   constructor throws. Verified on Linux (2026-11-11): with `TZ=America/New_York` the call returns an `Unexpected` error
   and `GetForLocalhostTest` fails; with `TZ=UTC` both pass. A fix also moves `NotAfter` on machines east of UTC by their
-  offset (today it is 9999-12-31 22:59:59Z at UTC+01:00), so it needs a decision.
-- **The package carries no license.** The project file sets `<licenses>`, which is not an MSBuild or NuGet property;
-  none of the packages checked (3.0.0 to 3.2.0 in `artifacts/`, and the builds of 2026-11-11 and 2026-11-15) has a
-  license element.
-  Forge.Next.Shared sets `<PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>`, and the `LICENSE` here is
-  the same Apache License 2.0. Recommended: the same property here, in the next version.
-- **The targets share one XML documentation file.** `<DocumentationFile>Forge.Next.Security.xml</DocumentationFile>`
-  makes the target builds (four since 2026-11-15), which run in parallel, write one file in the project folder, and
-  each target copies whatever is there at that moment into its output, which is what the package takes. The packages
-  checked here (3.0.0 to 3.2.0, and the four-target build of 2026-11-15) are whole, because the targets document the
-  same members. The same setting put an
-  empty, a truncated or another target's file into packages of Forge.Next.Formatters and Forge.Next.Shared (checked
-  2026-11-11). Recommended: remove the `DocumentationFile` line, so each target writes its own file under `obj/`, as
-  Forge.Next.LocalWebShell does; the `None Remove="Forge.Next.Security.xml"` item and the `.gitignore` entry are then
-  not needed.
+  offset (today it is 9999-12-31 22:59:59Z at UTC+01:00), so it needs a decision. Since 2026-11-15 (A5) the README
+  warns, and names the work-around: `CreateSelfSigned` with `DateTime.SpecifyKind(DateTime.MaxValue, DateTimeKind.Utc)`
+  (verified at -05:00, UTC and +01:00).
 - **The local 3.0.0 package; the published versions.** `artifacts/Forge.Next.Security.3.0.0.nupkg` (built 2026-06-30
   20:01, between the 3.0.0 and the 3.1.0 commits) holds an intermediate build: its DLL returns `ErrorOr` and references
   `Forge.Next.Shared` 3.0.0, while its README documents the throwing API of the 3.0.0 commit. Which versions are
   published is not known here: the local NuGet cache has none, and nuget.org was not asked. Do not publish the local
   3.0.0 file.
-- **README statements that do not match the code:**
-  - `AesDecrypt`: "A wrong password ... the original input is returned unchanged" holds in about 99.6 % of the cases
-    (the first item);
-  - "How Subject Alternative Names are built": "the skip rules ensure those defaults are never duplicated even if you
-    pass them explicitly" is not true for `0.0.0.0` and `::`, which are not skipped; the default list itself holds
-    `0.0.0.0` twice;
-  - `GetAlternateNames`: the "typical output" lists the custom DNS name last; it comes first among the DNS entries;
-  - the public constants `AesCryptography.Iterations` and `AesCryptography.DefaultOutputLength` are not documented;
-  - the notes do not say that the loaded keys stay in the machine key store, or that `GetForLocalhost` fails west of
-    UTC.
-- **Testing the `net8.0`, `net9.0` and `net11.0` builds:** the test project targets `net10.0` only, so the `net8.0`
-  branch of the PFX loading never runs in the tests. Recommended:
-  `<TargetFrameworks>net8.0;net9.0;net10.0;net11.0</TargetFrameworks>`.
 
 ## Not verified yet
 
-- **The `net8.0`, `net9.0` and `net11.0` builds** are compiled, not tested. The probe ran a few calls against the
-  `net8.0` build.
+- **The `net8.0`, `net9.0` and `net11.0` builds** are tested on Windows only (since 2026-11-15); the Linux run of
+  2026-11-11 tested `net10.0`.
 - **A non-elevated Windows process:** the tests ran elevated. The README says the `MachineKeySet` loads usually need
   administrator rights.
 - **Linux as a non-root user, and macOS:** the Linux run was as root; macOS was not tried.
@@ -100,10 +76,9 @@ default.
 - **Undisposed certificates:** `FindByThumbprint`, `FindByDnsNames` and `RemoveFromStore` read `store.Certificates`,
   which creates an `X509Certificate2` for every certificate in the store; those not returned are left to the finalizer.
   The ephemeral certificate inside the password overload is not disposed either.
-- **A known-answer test for the AES payload:** a fixed payload and password of the current format, so a change to the
-  format or a default fails a test instead of passing silently.
 - **The `net8.0` PFX loading** also accepts a DER certificate (the probe loaded a `.cer` with `GetFromFile`); the other
-  targets do not. Whether the difference should stay.
+  targets do not. Whether the difference should stay. Since 2026-11-15 the tests pin each target's result, so a change
+  shows up as a failing test.
 - **Whitespace-only content:** `AesEncrypt` turns it into `""`, so a decryption does not give it back. The README says
   so ("nothing to encrypt").
 - **The platform guard:** `OperatingSystem.IsWindows()` instead of `Environment.OSVersion.Platform`, so the CA1416
