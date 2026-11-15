@@ -63,7 +63,7 @@ All types live in the **`Forge.Next.Security`** namespace.
 
 | | |
 |---|---|
-| **Target frameworks** | `net8.0`, `net9.0`, `net10.0` |
+| **Target frameworks** | `net8.0`, `net9.0`, `net10.0`, `net11.0` |
 | **Language** | C# 12 |
 | **Dependencies** | [`Forge.Next.Shared`](https://github.com/JZO001/Forge.Next.Shared) (brings in `ErrorOr`) |
 | **Platforms** | Cross-platform. Certificate-store and friendly-name features are richest on Windows (see [platform notes](#notes-gotchas--platform-behaviour)). |

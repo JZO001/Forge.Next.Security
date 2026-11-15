@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+		<TargetFrameworks>net8.0;net9.0;net10.0;net11.0</TargetFrameworks>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<LangVersion>12.0</LangVersion>
@@ -44,7 +44,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
-	  <PackageReference Include="Forge.Next.Shared" Version="3.3.0" />
+		<PackageReference Include="Forge.Next.Shared" Version="3.3.2" />
 	</ItemGroup>
 
 </Project>
