@@ -1,9 +1,11 @@
 # Forge.Next.Security
 
-[![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0%20%7C%2010.0-512BD4)](https://dotnet.microsoft.com/)
+[![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0%20%7C%2010.0%20%7C%2011.0-512BD4)](https://dotnet.microsoft.com/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/JZO001/Forge.Next.Security#Apache-2.0-1-ov-file)
 
-A small, focused .NET library for **X.509 certificate management** and **AES encryption** — with first-class support for self-signed certificates (local development, internal services, TLS endpoints) and password-based symmetric encryption.
+**Certificates made simple. Encryption made accessible.**
+
+A small, focused, cross-platform .NET security library for **X.509 certificate management** and **authenticated AES-256-GCM encryption** — with first-class support for self-signed certificates (local development, internal services, TLS endpoints) and password-based symmetric encryption using PBKDF2 key derivation.
 
 Every public method returns an [`ErrorOr<T>`](https://github.com/amantinband/error-or) result instead of throwing, so failures are values you handle explicitly rather than exceptions you have to catch.
 
@@ -14,6 +16,7 @@ It is part of the **Forge Patterns and Practices** family.
 ## Table of contents
 
 - [Features](#features)
+- [Typical Use Cases](#typical-use-cases)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Working with `ErrorOr` results](#working-with-erroror-results)
@@ -59,6 +62,22 @@ It is part of the **Forge Patterns and Practices** family.
 - ✅ **Exception-free API** — every method returns `ErrorOr<T>`; nothing throws for expected failures.
 
 All types live in the **`Forge.Next.Security`** namespace.
+
+---
+
+## Typical Use Cases
+
+Forge.Next.Security is particularly useful for:
+
+- Generating self-signed X.509 certificates in C# with custom DNS names and IP addresses (Subject Alternative Names).
+- Creating HTTPS certificates for localhost development, including ASP.NET Core and Kestrel.
+- Provisioning self-signed TLS certificates for internal services and microservices where certificate trust is explicitly configured.
+- Adding, finding, enumerating and removing certificates in the operating system's certificate store, subject to platform support.
+- Importing and exporting PFX (PKCS#12) certificates and exporting public certificates as DER (`.cer`) files.
+- Encrypting and decrypting sensitive application strings using authenticated AES-256-GCM encryption.
+- Deriving cryptographic keys from passwords using PBKDF2.
+- Migrating legacy AES-CBC encrypted data to authenticated encryption (see [Security notes](#security-notes)).
+- Building security-related workflows with explicit, result-based error handling using `ErrorOr<T>`.
 
 ---
 
