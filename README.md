@@ -62,6 +62,7 @@ It is part of the **Forge Patterns and Practices** family.
 - [Security notes](#security-notes)
 - [Testing](#testing)
 - [Keywords](#keywords)
+- [Support the Project](#support-the-project)
 - [License](#license)
 
 ---
@@ -1002,6 +1003,24 @@ Name, SAN, RSA, SHA-256, certificate store, certificate thumbprint, DNS names, P
 CER certificate export, AES-256-GCM, authenticated encryption, symmetric encryption, password-based
 encryption, PBKDF2 key derivation, legacy AES-CBC migration, ASP.NET Core, Kestrel, cross-platform
 cryptography.
+
+---
+
+## Support the Project
+
+**Forge.Next.Security** is developed and maintained independently and provided free of charge.
+
+If this library saves you development time, helps your business, or makes your daily work easier, please consider giving the repository a ⭐ on GitHub.
+
+- ⭐ [Star the repository](https://github.com/JZO001/Forge.Next.Security/stargazers)
+- 💬 Share your feedback and experiences
+- 🐛 [Report bugs and suggest improvements](https://github.com/JZO001/Forge.Next.Security/issues)
+- 📢 Recommend the library to other developers
+- ☕ Consider sponsoring its continued development
+
+Even a simple GitHub star is a meaningful way to say thank you.
+
+**Open source is free to use, but it is not free to create and maintain.**
 
 ---
 
