@@ -1,9 +1,22 @@
 # Forge.Next.Security
 
-[![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0%20%7C%2010.0%20%7C%2011.0-512BD4)](https://dotnet.microsoft.com/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/JZO001/Forge.Next.Security#Apache-2.0-1-ov-file)
-
 **Certificates made simple. Encryption made accessible.**
+
+[![.NET 8](https://img.shields.io/badge/.NET-8-512BD4?style=flat&logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
+[![.NET 9](https://img.shields.io/badge/.NET-9-512BD4?style=flat&logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
+[![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?style=flat&logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
+[![.NET 11](https://img.shields.io/badge/.NET-11-512BD4?style=flat&logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
+[![C#](https://img.shields.io/badge/Language-C%23-239120?style=flat)](https://learn.microsoft.com/dotnet/csharp/)
+
+[![NuGet version](https://img.shields.io/nuget/v/Forge.Next.Security?style=flat&logo=nuget&logoColor=white)](https://www.nuget.org/packages/Forge.Next.Security)
+[![NuGet downloads](https://img.shields.io/nuget/dt/Forge.Next.Security?style=flat&logo=nuget&logoColor=white)](https://www.nuget.org/packages/Forge.Next.Security)
+[![License](https://img.shields.io/github/license/JZO001/Forge.Next.Security?style=flat)](https://github.com/JZO001/Forge.Next.Security)
+[![GitHub stars](https://img.shields.io/github/stars/JZO001/Forge.Next.Security?style=flat&logo=github)](https://github.com/JZO001/Forge.Next.Security/stargazers)
+
+[![ErrorOr Integration](https://img.shields.io/badge/ErrorOr-Integration-E67E22?style=flat)](https://github.com/amantinband/error-or)
+[![Certificates X.509](https://img.shields.io/badge/Certificates-X.509-555555?style=flat)](https://learn.microsoft.com/dotnet/api/system.security.cryptography.x509certificates)
+[![Encryption AES-256-GCM](https://img.shields.io/badge/Encryption-AES--256--GCM-555555?style=flat)](https://learn.microsoft.com/dotnet/api/system.security.cryptography.aesgcm)
+[![Key derivation PBKDF2](https://img.shields.io/badge/Key_derivation-PBKDF2-555555?style=flat)](https://learn.microsoft.com/dotnet/api/system.security.cryptography.rfc2898derivebytes)
 
 A small, focused, cross-platform .NET security library for **X.509 certificate management** and **authenticated AES-256-GCM encryption** — with first-class support for self-signed certificates (local development, internal services, TLS endpoints) and password-based symmetric encryption using PBKDF2 key derivation.
 
@@ -48,6 +61,7 @@ It is part of the **Forge Patterns and Practices** family.
 - [Notes, gotchas & platform behaviour](#notes-gotchas--platform-behaviour)
 - [Security notes](#security-notes)
 - [Testing](#testing)
+- [Keywords](#keywords)
 - [License](#license)
 
 ---
@@ -975,6 +989,19 @@ The repository contains an xUnit test suite under `tests/Forge.Next.Security.Tes
 ```bash
 dotnet test
 ```
+
+---
+
+## Keywords
+
+Forge Patterns and Practices, Forge.Next, C#, .NET, .NET 8, .NET 9, .NET 10, .NET 11, NuGet package,
+ErrorOr, result pattern, result-based error handling, functional error handling, C# cryptography
+library, .NET security library, X.509 certificate management, self-signed certificates, certificate
+generation, localhost HTTPS certificates, TLS certificates, SSL certificates, Subject Alternative
+Name, SAN, RSA, SHA-256, certificate store, certificate thumbprint, DNS names, PFX, PKCS#12, DER,
+CER certificate export, AES-256-GCM, authenticated encryption, symmetric encryption, password-based
+encryption, PBKDF2 key derivation, legacy AES-CBC migration, ASP.NET Core, Kestrel, cross-platform
+cryptography.
 
 ---
 
